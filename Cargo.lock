@@ -384,6 +384,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossterm 0.29.0",
+ "pandere-core",
  "ratatui",
  "tokio",
  "tracing",

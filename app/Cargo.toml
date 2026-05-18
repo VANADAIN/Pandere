@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0"
 crossterm = "0.29"
+pandere-core = { path = "../core" }
 ratatui = "0.29"
 tokio = { version = "1.47", features = ["full"] }
 tracing = "0.1"
