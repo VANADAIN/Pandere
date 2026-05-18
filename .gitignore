@@ -137,3 +137,8 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+
+# Added by cargo
+
+/target
