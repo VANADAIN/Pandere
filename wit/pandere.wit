@@ -1,0 +1,83 @@
+package pandere:messenger@0.1.0;
+
+interface types {
+    enum service {
+        telegram,
+    }
+
+    record plugin-metadata {
+        id: string,
+        display-name: string,
+        service: service,
+        version: string,
+    }
+
+    record auth-status {
+        is-authenticated: bool,
+        account-label: option<string>,
+    }
+
+    record chat-summary {
+        id: string,
+        title: string,
+        last-message-preview: option<string>,
+        unread-count: u32,
+        last-activity-unix-secs: option<u64>,
+    }
+
+    record message {
+        id: string,
+        chat-id: string,
+        author-name: string,
+        text: string,
+        sent-at-unix-secs: u64,
+        is-outgoing: bool,
+    }
+
+    record sync-cursor {
+        position: string,
+        updated-at-unix-secs: u64,
+    }
+
+    record sync-page {
+        messages: list<message>,
+        next-cursor: option<sync-cursor>,
+    }
+
+    record retention-hints {
+        can-persist-locally: bool,
+        suggested-message-ttl-secs: option<u64>,
+        suggested-media-ttl-secs: option<u64>,
+    }
+
+    variant plugin-error {
+        invalid-input(string),
+        auth-required,
+        rate-limited(string),
+        upstream-failure(string),
+        unsupported(string),
+    }
+}
+
+interface host {
+    log: func(level: string, message: string);
+    now-unix-secs: func() -> u64;
+}
+
+interface plugin {
+    use types.{auth-status, chat-summary, message, plugin-error, plugin-metadata, retention-hints, sync-cursor, sync-page};
+
+    metadata: func() -> plugin-metadata;
+    auth-status: func() -> result<auth-status, plugin-error>;
+    bootstrap-auth: func() -> result<auth-status, plugin-error>;
+    list-chats: func() -> result<list<chat-summary>, plugin-error>;
+    fetch-messages: func(chat-id: string, cursor: option<sync-cursor>) -> result<sync-page, plugin-error>;
+    sync-updates: func(cursor: option<sync-cursor>) -> result<sync-page, plugin-error>;
+    send-text: func(chat-id: string, text: string) -> result<message, plugin-error>;
+    retention-hints: func() -> retention-hints;
+}
+
+world messenger-plugin {
+    import host;
+    export plugin;
+}
