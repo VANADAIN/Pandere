@@ -39,7 +39,7 @@ pub fn draw_app(
         Screen::Messenger => draw_messenger(frame, chunks[1], chats, messages),
     }
 
-    let footer = Paragraph::new("1 Main  2 Login  3 Messenger  Enter Next/Submit  r Refresh Code  q Quit")
+    let footer = Paragraph::new("1 Main  2 Login  3 Messenger  Enter Next/Submit  r Refresh Code  x Logout  q Quit")
         .block(Block::default().borders(Borders::ALL).title("Keys"));
     frame.render_widget(footer, chunks[2]);
 }

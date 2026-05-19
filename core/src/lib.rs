@@ -1,3 +1,5 @@
+pub mod paths;
+
 use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

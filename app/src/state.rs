@@ -242,6 +242,7 @@ impl AppState {
         lines.push("Login controls:".into());
         lines.push("enter advances current login step".into());
         lines.push("r request or refresh code".into());
+        lines.push("x logout and clear saved session".into());
         lines.push("backspace edit input".into());
         lines.push("esc clear input/notice".into());
 

@@ -2,7 +2,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode};
-use pandere_plugin_telegram::{AuthStatus as TelegramAuthStatus, LoginPhase, TelegramClient};
+use pandere_plugin_telegram::{
+    AuthStatus as TelegramAuthStatus, LoginPhase, TelegramClient, TelegramConfig,
+    clear_session_file,
+};
 use ratatui::{Frame, Terminal, prelude::CrosstermBackend};
 
 use crate::{
@@ -22,12 +25,21 @@ pub enum Screen {
 
 pub struct App {
     state: AppState,
+    telegram_config: Option<TelegramConfig>,
     telegram: Option<TelegramClient>,
 }
 
 impl App {
-    pub fn new(state: AppState, telegram: Option<TelegramClient>) -> Self {
-        Self { state, telegram }
+    pub fn new(
+        state: AppState,
+        telegram_config: Option<TelegramConfig>,
+        telegram: Option<TelegramClient>,
+    ) -> Self {
+        Self {
+            state,
+            telegram_config,
+            telegram,
+        }
     }
 
     pub async fn initialize(&mut self) -> Result<()> {
@@ -57,6 +69,10 @@ impl App {
                 match key.code {
                     KeyCode::Char('r') => {
                         self.request_login_code().await?;
+                        continue;
+                    }
+                    KeyCode::Char('x') => {
+                        self.logout_telegram().await?;
                         continue;
                     }
                     KeyCode::Enter => {
@@ -187,5 +203,21 @@ impl App {
                 Ok(())
             }
         }
+    }
+
+    async fn logout_telegram(&mut self) -> Result<()> {
+        let Some(config) = self.telegram_config.clone() else {
+            self.state.set_login_notice("telegram config is unavailable");
+            return Ok(());
+        };
+
+        self.telegram = None;
+        clear_session_file(&config.session_path)?;
+
+        let telegram = TelegramClient::connect(config).await?;
+        self.telegram = Some(telegram);
+        self.state.clear_login_input();
+        self.state.set_login_notice("telegram session cleared");
+        self.refresh_telegram_state().await
     }
 }

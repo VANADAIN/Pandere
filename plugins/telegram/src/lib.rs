@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{fs, io};
 
 use anyhow::{Context, Result, anyhow};
 use grammers_client::client::{LoginToken, PasswordToken};
@@ -9,6 +10,7 @@ use grammers_client::peer::User;
 use grammers_client::{Client, SignInError};
 use grammers_mtsender::SenderPool;
 use grammers_session::storages::SqliteSession;
+use pandere_core::paths::pandere_paths;
 use pandere_core::{ChatId, ChatSummary, Service};
 use tokio::task::JoinHandle;
 
@@ -35,7 +37,7 @@ impl TelegramConfig {
             std::env::var("TELEGRAM_PHONE").context("missing TELEGRAM_PHONE")?;
         let session_path = std::env::var("TELEGRAM_SESSION_PATH")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("telegram.session"));
+            .unwrap_or_else(|_| default_session_path());
 
         Ok(Self {
             api_id,
@@ -63,6 +65,19 @@ impl TelegramConfig {
         }
 
         Ok(())
+    }
+}
+
+pub fn default_session_path() -> PathBuf {
+    pandere_paths().telegram_session_path()
+}
+
+pub fn clear_session_file(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(anyhow!(error))
+            .with_context(|| format!("failed to remove telegram session file `{}`", path.display())),
     }
 }
 
@@ -117,6 +132,7 @@ pub struct TelegramClient {
 impl TelegramClient {
     pub async fn connect(config: TelegramConfig) -> Result<Self> {
         config.validate()?;
+        create_parent_dir(&config.session_path)?;
 
         let session = Arc::new(
             SqliteSession::open(&config.session_path)
@@ -365,6 +381,15 @@ impl TelegramClient {
 
         Ok(chats)
     }
+}
+
+fn create_parent_dir(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create telegram data directory `{}`", parent.display()))
 }
 
 impl Drop for TelegramClient {
