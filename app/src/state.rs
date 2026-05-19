@@ -8,12 +8,20 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
-pub struct MessengerOverview {
+pub struct PluginCard {
     pub display_name: String,
+    pub version: String,
     pub service: Service,
+    pub enabled: bool,
     pub auth_label: String,
     pub sync_label: String,
     pub plugin_status_label: String,
+    pub component_label: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChatPreview {
+    pub title: String,
     pub unread_count: u32,
     pub last_message_preview: Option<String>,
 }
@@ -41,18 +49,34 @@ impl AppState {
         })
     }
 
-    pub fn messenger_overviews(&self) -> Vec<MessengerOverview> {
+    pub fn plugin_cards(&self) -> Vec<PluginCard> {
         let loaded = self.registry.primary().cloned().unwrap_or_else(fallback_messenger);
+        let plugin_status_label = loaded.status_label();
+        let component_label = loaded
+            .manifest
+            .component_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "embedded dummy component".into());
 
+        vec![PluginCard {
+            display_name: loaded.manifest.display_name,
+            version: loaded.manifest.version,
+            service: loaded.manifest.service,
+            enabled: loaded.manifest.enabled,
+            auth_label: self.source.auth_status.label(),
+            sync_label: self.source.sync_status.label(),
+            plugin_status_label,
+            component_label,
+        }]
+    }
+
+    pub fn chat_previews(&self) -> Vec<ChatPreview> {
         self.source
             .chats
             .iter()
-            .map(|chat| MessengerOverview {
-                display_name: format!("{} / {}", self.source.display_name, chat.title),
-                service: self.source.service,
-                auth_label: self.source.auth_status.label(),
-                sync_label: self.source.sync_status.label(),
-                plugin_status_label: loaded.status_label(),
+            .map(|chat| ChatPreview {
+                title: chat.title.clone(),
                 unread_count: chat.unread_count,
                 last_message_preview: chat.last_message_preview.clone(),
             })

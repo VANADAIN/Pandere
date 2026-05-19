@@ -17,7 +17,6 @@ pub struct PluginManifest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginLoadStatus {
     Loaded,
-    PlaceholderTrap,
     Failed(String),
     Disabled,
 }
@@ -26,7 +25,6 @@ impl PluginLoadStatus {
     pub fn label(&self) -> String {
         match self {
             Self::Loaded => "loaded".into(),
-            Self::PlaceholderTrap => "loaded (placeholder exports)".into(),
             Self::Failed(message) => format!("failed: {message}"),
             Self::Disabled => "disabled".into(),
         }
@@ -88,17 +86,6 @@ fn instantiate_dummy_component() -> Result<PluginLoadStatus> {
     let component_bytes = dummy_component_bytes()?;
     let component = host.load_component_from_bytes(&component_bytes)?;
     let runtime = RuntimeHost::default();
-    let mut plugin = host.instantiate(&component, runtime)?;
-
-    match plugin.metadata() {
-        Ok(_) => Ok(PluginLoadStatus::Loaded),
-        Err(error) => {
-            let message = format!("{error:#}");
-            if message.contains("unreachable") || message.contains("wasm trap") {
-                Ok(PluginLoadStatus::PlaceholderTrap)
-            } else {
-                Err(error)
-            }
-        }
-    }
+    host.probe_component(&component, runtime)?;
+    Ok(PluginLoadStatus::Loaded)
 }

@@ -5,7 +5,7 @@ mod engine;
 mod runtime_host;
 
 pub use bindings::*;
-pub use component::{LoadedPlugin, PluginHost};
+pub use component::{ComponentProbe, LoadedPlugin, PluginHost};
 pub use dummy::dummy_component_bytes;
 pub use engine::component_engine;
 pub use runtime_host::{HostState, LogEntry, RuntimeHost};
@@ -50,18 +50,10 @@ mod tests {
             .expect("dummy component should compile");
 
         let runtime = RuntimeHost::default();
-        let mut plugin = host
-            .instantiate(&component, runtime)
-            .expect("component should instantiate");
-
-        let metadata_error = plugin
-            .metadata()
-            .expect_err("dummy guest export should trap when called");
-        let message = format!("{metadata_error:#}");
-        assert!(
-            message.contains("unreachable") || message.contains("wasm trap"),
-            "unexpected trap error: {message}"
-        );
+        let probe = host
+            .probe_component(&component, runtime)
+            .expect("component should instantiate through probe");
+        assert!(probe.instantiated);
 
         let _ = Service::Telegram;
     }

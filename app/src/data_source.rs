@@ -37,7 +37,6 @@ impl SyncStatus {
 
 #[derive(Debug, Clone)]
 pub struct MessengerSnapshot {
-    pub display_name: String,
     pub service: Service,
     pub auth_status: AuthStatus,
     pub sync_status: SyncStatus,

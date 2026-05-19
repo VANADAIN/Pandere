@@ -53,7 +53,8 @@ impl App {
         ui::draw_app(
             frame,
             self.state.screen,
-            &self.state.messenger_overviews(),
+            &self.state.plugin_cards(),
+            &self.state.chat_previews(),
             self.state.chats(),
             &self.state.messages(),
             &self.state.login_lines(),

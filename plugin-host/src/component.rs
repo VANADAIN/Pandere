@@ -16,6 +16,11 @@ use crate::{
     runtime_host::RuntimeHost,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentProbe {
+    pub instantiated: bool,
+}
+
 pub struct PluginHost {
     engine: Engine,
     linker: Linker<RuntimeHost>,
@@ -51,6 +56,11 @@ impl PluginHost {
             .context("failed to instantiate messenger plugin component")?;
 
         Ok(LoadedPlugin { store, world })
+    }
+
+    pub fn probe_component(&self, component: &Component, host: RuntimeHost) -> Result<ComponentProbe> {
+        let _plugin = self.instantiate(component, host)?;
+        Ok(ComponentProbe { instantiated: true })
     }
 }
 

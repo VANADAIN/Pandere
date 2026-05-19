@@ -8,12 +8,13 @@ use ratatui::{
 };
 
 use crate::app::Screen;
-use crate::state::MessengerOverview;
+use crate::state::{ChatPreview, PluginCard};
 
 pub fn draw_app(
     frame: &mut Frame,
     screen: Screen,
-    messenger_overviews: &[MessengerOverview],
+    plugin_cards: &[PluginCard],
+    chat_previews: &[ChatPreview],
     chats: &[ChatSummary],
     messages: &[Message],
     login_lines: &[String],
@@ -33,7 +34,7 @@ pub fn draw_app(
     frame.render_widget(title, chunks[0]);
 
     match screen {
-        Screen::Main => draw_main(frame, chunks[1], messenger_overviews),
+        Screen::Main => draw_main(frame, chunks[1], plugin_cards, chat_previews),
         Screen::Login => draw_login(frame, chunks[1], login_lines),
         Screen::Messenger => draw_messenger(frame, chunks[1], chats, messages),
     }
@@ -43,27 +44,50 @@ pub fn draw_app(
     frame.render_widget(footer, chunks[2]);
 }
 
-fn draw_main(frame: &mut Frame, area: Rect, overviews: &[MessengerOverview]) {
-    let items = overviews.iter().map(|messenger| {
-        let preview = messenger
+fn draw_main(
+    frame: &mut Frame,
+    area: Rect,
+    plugin_cards: &[PluginCard],
+    chat_previews: &[ChatPreview],
+) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .split(area);
+
+    let plugin_items = plugin_cards.iter().map(|plugin| {
+        ListItem::new(vec![
+            Line::from(format!(
+                "{} v{} ({:?})",
+                plugin.display_name, plugin.version, plugin.service
+            )),
+            Line::from(format!(
+                "enabled={}  auth={}  sync={}",
+                plugin.enabled, plugin.auth_label, plugin.sync_label
+            )),
+            Line::from(format!(
+                "plugin={}  component={}",
+                plugin.plugin_status_label, plugin.component_label
+            )),
+        ])
+    });
+    let plugin_list = List::new(plugin_items.collect::<Vec<_>>())
+        .block(Block::default().borders(Borders::ALL).title("Plugin Registry"));
+    frame.render_widget(plugin_list, columns[0]);
+
+    let chat_items = chat_previews.iter().map(|chat| {
+        let preview = chat
             .last_message_preview
             .as_deref()
             .unwrap_or("No messages yet");
         ListItem::new(format!(
-            "{} ({:?})  [{} unread]  auth={}  sync={}  plugin={}  {}",
-            messenger.display_name,
-            messenger.service,
-            messenger.unread_count,
-            messenger.auth_label,
-            messenger.sync_label,
-            messenger.plugin_status_label,
-            preview
+            "{}  [{} unread]  {}",
+            chat.title, chat.unread_count, preview
         ))
     });
-
-    let list =
-        List::new(items.collect::<Vec<_>>()).block(Block::default().borders(Borders::ALL).title("Main Screen"));
-    frame.render_widget(list, area);
+    let chat_list = List::new(chat_items.collect::<Vec<_>>())
+        .block(Block::default().borders(Borders::ALL).title("Chat Preview"));
+    frame.render_widget(chat_list, columns[1]);
 }
 
 fn draw_login(frame: &mut Frame, area: Rect, login_lines: &[String]) {

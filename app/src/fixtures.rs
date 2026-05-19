@@ -77,7 +77,6 @@ impl MessengerDataSource for FixtureMessengerSource {
         let messages = fixture_messages(&chats);
 
         Ok(MessengerSnapshot {
-            display_name: "Telegram".into(),
             service: Service::Telegram,
             auth_status: AuthStatus::NeedsLogin,
             sync_status: SyncStatus::Pending,
@@ -104,10 +103,9 @@ impl MessengerDataSource for HostBackedFixtureSource {
 
         let (auth_status, sync_status) = match &self.messenger.status {
             PluginLoadStatus::Loaded => (
-                AuthStatus::Authenticated("component initialized".into()),
-                SyncStatus::Idle,
+                AuthStatus::NeedsLogin,
+                SyncStatus::Pending,
             ),
-            PluginLoadStatus::PlaceholderTrap => (AuthStatus::NeedsLogin, SyncStatus::Pending),
             PluginLoadStatus::Failed(message) => (
                 AuthStatus::Unavailable(message.clone()),
                 SyncStatus::Failed(message.clone()),
@@ -119,7 +117,6 @@ impl MessengerDataSource for HostBackedFixtureSource {
         };
 
         Ok(MessengerSnapshot {
-            display_name: self.messenger.manifest.display_name.clone(),
             service: self.messenger.manifest.service,
             auth_status,
             sync_status,
