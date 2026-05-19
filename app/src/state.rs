@@ -53,11 +53,19 @@ impl ThreadStatus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessengerView {
+    Root,
+    GroupThreads { root_chat_id: ChatId },
+}
+
 pub struct AppState {
     pub screen: Screen,
     pub source: MessengerSnapshot,
     pub registry: PluginRegistry,
-    pub selected_chat_id: Option<ChatId>,
+    pub selected_root_chat_id: Option<ChatId>,
+    pub selected_thread_chat_id: Option<ChatId>,
+    pub messenger_view: MessengerView,
     pub login_phase: Option<LoginPhase>,
     pub login_input_mode: Option<LoginInputMode>,
     pub login_input: String,
@@ -67,6 +75,8 @@ pub struct AppState {
     pub login_has_saved_session: bool,
     pub login_password_hint: Option<String>,
     pub login_user_label: Option<String>,
+    pub forum_threads: HashMap<ChatId, Vec<ChatSummary>>,
+    pub forum_threads_status: ThreadStatus,
     pub thread_cache: HashMap<ChatId, Vec<Message>>,
     pub thread_status: ThreadStatus,
     pub composer_active: bool,
@@ -80,21 +90,15 @@ impl AppState {
         registry: PluginRegistry,
     ) -> Result<Self> {
         let source = source.snapshot()?;
-        let selected_chat_id = source.chats.first().map(|chat| chat.id.clone());
         let thread_cache = build_thread_cache(&source.messages);
-        let initial_messages = selected_chat_id
-            .as_ref()
-            .and_then(|chat_id| thread_cache.get(chat_id).cloned())
-            .unwrap_or_else(|| source.messages.clone());
 
-        Ok(Self {
+        let mut state = Self {
             screen: Screen::Main,
-            source: crate::data_source::MessengerSnapshot {
-                messages: initial_messages,
-                ..source
-            },
+            source,
             registry,
-            selected_chat_id,
+            selected_root_chat_id: None,
+            selected_thread_chat_id: None,
+            messenger_view: MessengerView::Root,
             login_phase: None,
             login_input_mode: None,
             login_input: String::new(),
@@ -104,12 +108,17 @@ impl AppState {
             login_has_saved_session: false,
             login_password_hint: None,
             login_user_label: None,
+            forum_threads: HashMap::new(),
+            forum_threads_status: ThreadStatus::Idle,
             thread_cache,
             thread_status: ThreadStatus::Idle,
             composer_active: false,
             composer_input: String::new(),
             composer_notice: None,
-        })
+        };
+        state.reset_messenger_selection();
+        let _ = state.apply_cached_thread();
+        Ok(state)
     }
 
     pub fn set_login_notice(&mut self, notice: impl Into<String>) {
@@ -201,47 +210,174 @@ impl AppState {
         &self.source.chats
     }
 
+    pub fn root_chats(&self) -> Vec<&ChatSummary> {
+        self.source
+            .chats
+            .iter()
+            .filter(|chat| !is_topic_chat_id(&chat.id))
+            .collect()
+    }
+
+    pub fn thread_chats(&self) -> Vec<&ChatSummary> {
+        let Some(root_chat_id) = self.selected_root_chat_id.as_ref() else {
+            return Vec::new();
+        };
+        self.forum_threads
+            .get(root_chat_id)
+            .map(|threads| threads.iter().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn selected_root_chat(&self) -> Option<&ChatSummary> {
+        let selected = self.selected_root_chat_id.as_ref()?;
+        self.source.chats.iter().find(|chat| &chat.id == selected)
+    }
+
+    pub fn selected_leaf_chat(&self) -> Option<&ChatSummary> {
+        let chat_id = self.active_chat_id()?;
+        self.source.chats.iter().find(|chat| chat.id == chat_id)
+    }
+
     pub fn messages(&self) -> Vec<Message> {
         self.source.messages.clone()
     }
 
-    pub fn selected_chat_index(&self) -> Option<usize> {
-        let selected = self.selected_chat_id.as_ref()?;
-        self.source
-            .chats
+    pub fn selected_root_chat_index(&self) -> Option<usize> {
+        let selected = self.selected_root_chat_id.as_ref()?;
+        self.root_chats()
             .iter()
             .position(|chat| &chat.id == selected)
     }
 
-    pub fn select_next_chat(&mut self) {
-        if self.source.chats.is_empty() {
-            self.selected_chat_id = None;
-            return;
-        }
-
-        let current = self.selected_chat_index().unwrap_or(0);
-        let next = (current + 1).min(self.source.chats.len() - 1);
-        self.selected_chat_id = Some(self.source.chats[next].id.clone());
+    pub fn selected_thread_chat_index(&self) -> Option<usize> {
+        let selected = self.selected_thread_chat_id.as_ref()?;
+        self.thread_chats()
+            .iter()
+            .position(|chat| &chat.id == selected)
     }
 
-    pub fn select_previous_chat(&mut self) {
-        if self.source.chats.is_empty() {
-            self.selected_chat_id = None;
+    pub fn selected_root_has_threads(&self) -> bool {
+        self.selected_root_chat()
+            .map(|chat| chat.has_subchats)
+            .unwrap_or(false)
+    }
+
+    pub fn active_chat_id(&self) -> Option<ChatId> {
+        match &self.messenger_view {
+            MessengerView::Root => {
+                if self.selected_root_has_threads() {
+                    None
+                } else {
+                    self.selected_root_chat_id.clone()
+                }
+            }
+            MessengerView::GroupThreads { .. } => self.selected_thread_chat_id.clone(),
+        }
+    }
+
+    pub fn preview_chat_id(&self) -> Option<ChatId> {
+        match &self.messenger_view {
+            MessengerView::Root => {
+                if self.selected_root_has_threads() {
+                    self.selected_thread_chat_id.clone()
+                } else {
+                    self.selected_root_chat_id.clone()
+                }
+            }
+            MessengerView::GroupThreads { .. } => self.selected_thread_chat_id.clone(),
+        }
+    }
+
+    pub fn reset_messenger_selection(&mut self) {
+        let first_root = self.root_chats().first().map(|chat| chat.id.clone());
+        if self
+            .selected_root_chat_id
+            .as_ref()
+            .is_none_or(|selected| !self.root_chats().iter().any(|chat| chat.id == *selected))
+        {
+            self.selected_root_chat_id = first_root;
+        }
+        self.messenger_view = MessengerView::Root;
+        self.sync_selected_thread_to_root();
+        self.source.messages.clear();
+        self.forum_threads_status = ThreadStatus::Idle;
+        self.thread_status = ThreadStatus::Idle;
+    }
+
+    pub fn select_next_root_chat(&mut self) {
+        let root_chats = self.root_chats();
+        if root_chats.is_empty() {
+            self.selected_root_chat_id = None;
             return;
         }
 
-        let current = self.selected_chat_index().unwrap_or(0);
+        let current = self.selected_root_chat_index().unwrap_or(0);
+        let next = (current + 1).min(root_chats.len() - 1);
+        self.selected_root_chat_id = Some(root_chats[next].id.clone());
+        self.sync_selected_thread_to_root();
+    }
+
+    pub fn select_previous_root_chat(&mut self) {
+        let root_chats = self.root_chats();
+        if root_chats.is_empty() {
+            self.selected_root_chat_id = None;
+            return;
+        }
+
+        let current = self.selected_root_chat_index().unwrap_or(0);
         let previous = current.saturating_sub(1);
-        self.selected_chat_id = Some(self.source.chats[previous].id.clone());
+        self.selected_root_chat_id = Some(root_chats[previous].id.clone());
+        self.sync_selected_thread_to_root();
+    }
+
+    pub fn select_next_thread_chat(&mut self) {
+        let thread_chats = self.thread_chats();
+        if thread_chats.is_empty() {
+            self.selected_thread_chat_id = None;
+            return;
+        }
+
+        let current = self.selected_thread_chat_index().unwrap_or(0);
+        let next = (current + 1).min(thread_chats.len() - 1);
+        self.selected_thread_chat_id = Some(thread_chats[next].id.clone());
+    }
+
+    pub fn select_previous_thread_chat(&mut self) {
+        let thread_chats = self.thread_chats();
+        if thread_chats.is_empty() {
+            self.selected_thread_chat_id = None;
+            return;
+        }
+
+        let current = self.selected_thread_chat_index().unwrap_or(0);
+        let previous = current.saturating_sub(1);
+        self.selected_thread_chat_id = Some(thread_chats[previous].id.clone());
+    }
+
+    pub fn enter_selected_root(&mut self) {
+        let Some(root_chat_id) = self.selected_root_chat_id.clone() else {
+            return;
+        };
+        if self.selected_root_has_threads() {
+            self.messenger_view = MessengerView::GroupThreads { root_chat_id };
+        }
+    }
+
+    pub fn leave_group_threads(&mut self) {
+        self.messenger_view = MessengerView::Root;
+    }
+
+    pub fn is_inside_group_threads(&self) -> bool {
+        matches!(self.messenger_view, MessengerView::GroupThreads { .. })
     }
 
     pub fn apply_cached_thread(&mut self) -> bool {
-        let Some(chat_id) = self.selected_chat_id.as_ref() else {
+        let Some(chat_id) = self.preview_chat_id() else {
             self.source.messages.clear();
             return false;
         };
 
-        let Some(messages) = self.thread_cache.get(chat_id).cloned() else {
+        let Some(messages) = self.thread_cache.get(&chat_id).cloned() else {
             return false;
         };
 
@@ -252,10 +388,38 @@ impl AppState {
 
     pub fn cache_thread(&mut self, chat_id: ChatId, messages: Vec<Message>) {
         self.thread_cache.insert(chat_id.clone(), messages.clone());
-        if self.selected_chat_id.as_ref() == Some(&chat_id) {
+        if self.preview_chat_id().as_ref() == Some(&chat_id) {
             self.source.messages = messages;
             self.thread_status = ThreadStatus::Idle;
         }
+    }
+
+    pub fn apply_cached_forum_threads(&mut self) -> bool {
+        let Some(root_chat_id) = self.selected_root_chat_id.as_ref() else {
+            return false;
+        };
+        if self.forum_threads.contains_key(root_chat_id) {
+            self.forum_threads_status = ThreadStatus::Idle;
+            self.sync_selected_thread_to_root();
+            return true;
+        }
+        false
+    }
+
+    pub fn cache_forum_threads(&mut self, root_chat_id: ChatId, threads: Vec<ChatSummary>) {
+        self.forum_threads.insert(root_chat_id.clone(), threads);
+        if self.selected_root_chat_id.as_ref() == Some(&root_chat_id) {
+            self.forum_threads_status = ThreadStatus::Idle;
+            self.sync_selected_thread_to_root();
+        }
+    }
+
+    pub fn set_forum_threads_loading(&mut self) {
+        self.forum_threads_status = ThreadStatus::Loading;
+    }
+
+    pub fn set_forum_threads_failed(&mut self, message: impl Into<String>) {
+        self.forum_threads_status = ThreadStatus::Failed(message.into());
     }
 
     pub fn set_thread_loading(&mut self) {
@@ -270,6 +434,35 @@ impl AppState {
 
     pub fn thread_status_label(&self) -> String {
         self.thread_status.label()
+    }
+
+    pub fn thread_column_title(&self) -> String {
+        if self.is_inside_group_threads() {
+            self.selected_root_chat()
+                .map(|root_chat| format!("Threads in {}", root_chat.title))
+                .unwrap_or_else(|| "Threads".into())
+        } else {
+            "Preview".into()
+        }
+    }
+
+    pub fn thread_placeholder(&self) -> String {
+        match &self.messenger_view {
+            MessengerView::Root => match self.selected_root_chat() {
+                Some(_chat) if self.selected_root_has_threads() => {
+                    match &self.forum_threads_status {
+                        ThreadStatus::Idle => "Supergroup preview. Press Right to enter threads.".into(),
+                        ThreadStatus::Loading => "Loading threads...".into(),
+                        ThreadStatus::Failed(message) => format!("Failed to load threads: {message}"),
+                    }
+                }
+                Some(chat) => format!("Opening {}", chat.title),
+                None => "No chat selected".into(),
+            },
+            MessengerView::GroupThreads { .. } => {
+                "Select a thread with Up/Down".into()
+            }
+        }
     }
 
     pub fn activate_composer(&mut self) {
@@ -394,4 +587,28 @@ pub(crate) fn build_thread_cache(messages: &[Message]) -> HashMap<ChatId, Vec<Me
         cache.entry(message.chat_id.clone()).or_default().push(message.clone());
     }
     cache
+}
+
+fn is_topic_chat_id(chat_id: &ChatId) -> bool {
+    chat_id.as_str().contains(":topic:")
+}
+
+impl AppState {
+    fn sync_selected_thread_to_root(&mut self) {
+        let thread_chats = self.thread_chats();
+        if thread_chats.is_empty() {
+            self.selected_thread_chat_id = None;
+            return;
+        }
+
+        if self
+            .selected_thread_chat_id
+            .as_ref()
+            .is_some_and(|selected| thread_chats.iter().any(|chat| chat.id == *selected))
+        {
+            return;
+        }
+
+        self.selected_thread_chat_id = thread_chats.first().map(|chat| chat.id.clone());
+    }
 }

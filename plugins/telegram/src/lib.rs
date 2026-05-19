@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -5,14 +6,19 @@ use std::{fs, io};
 
 use anyhow::{Context, Result, anyhow};
 use grammers_client::client::{LoginToken, PasswordToken};
+use grammers_client::message::InputMessage;
 use grammers_client::peer::{Dialog, Peer, User};
+use grammers_client::tl;
 use grammers_client::{Client, SignInError};
 use grammers_mtsender::SenderPool;
 use grammers_session::types::PeerRef;
+use grammers_session::types::PeerId;
 use grammers_session::storages::SqliteSession;
 use pandere_core::paths::pandere_paths;
 use pandere_core::{ChatId, ChatSummary, Message, MessageId, Service};
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
+use tracing::info;
 
 pub fn crate_name() -> &'static str {
     "pandere-plugin-telegram"
@@ -144,6 +150,7 @@ pub struct LoginState {
 #[derive(Clone)]
 pub struct TelegramFetchClient {
     client: Client,
+    peer_refs: Arc<RwLock<HashMap<i64, PeerRef>>>,
 }
 
 pub struct TelegramClient {
@@ -153,6 +160,7 @@ pub struct TelegramClient {
     runner_task: JoinHandle<()>,
     login_token: Option<LoginToken>,
     password_token: Option<PasswordToken>,
+    peer_refs: Arc<RwLock<HashMap<i64, PeerRef>>>,
 }
 
 impl TelegramClient {
@@ -183,6 +191,7 @@ impl TelegramClient {
             runner_task,
             login_token: None,
             password_token: None,
+            peer_refs: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -216,6 +225,7 @@ impl TelegramClient {
     pub fn fetch_client(&self) -> TelegramFetchClient {
         TelegramFetchClient {
             client: self.client.clone(),
+            peer_refs: Arc::clone(&self.peer_refs),
         }
     }
 
@@ -409,10 +419,15 @@ impl TelegramClient {
                 break;
             };
 
+            self.cache_peer_ref(&dialog).await;
             chats.push(map_dialog(dialog));
         }
 
         Ok(chats)
+    }
+
+    pub async fn list_forum_topics(&self, chat_id: &ChatId, limit: usize) -> Result<Vec<ChatSummary>> {
+        self.fetch_client().list_forum_topics(chat_id, limit).await
     }
 
     pub async fn fetch_messages(&self, chat_id: &ChatId, limit: usize) -> Result<Vec<Message>> {
@@ -422,27 +437,80 @@ impl TelegramClient {
     pub async fn send_text(&self, chat_id: &ChatId, text: &str) -> Result<Message> {
         self.fetch_client().send_text(chat_id, text).await
     }
+
+    async fn cache_peer_ref(&self, dialog: &Dialog) {
+        self.peer_refs
+            .write()
+            .await
+            .insert(dialog.peer().id().bot_api_dialog_id(), dialog.peer_ref());
+    }
 }
 
 impl TelegramFetchClient {
+    pub async fn list_forum_topics(&self, chat_id: &ChatId, limit: usize) -> Result<Vec<ChatSummary>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let peer = self
+            .find_peer_ref(chat_id)
+            .await?
+            .ok_or_else(|| anyhow!("telegram forum `{}` not found in cache", chat_id.as_str()))?;
+        let parent_dialog_id = parse_dialog_id(chat_id.as_str())
+            .ok_or_else(|| anyhow!("invalid telegram forum chat id `{}`", chat_id.as_str()))?;
+
+        let forum_topics = self
+            .client
+            .invoke(&tl::functions::messages::GetForumTopics {
+                peer: peer.into(),
+                q: None,
+                offset_date: 0,
+                offset_id: 0,
+                offset_topic: 0,
+                limit: limit.min(i32::MAX as usize) as i32,
+            })
+            .await
+            .context("failed to fetch telegram forum topics")?;
+
+        let tl::enums::messages::ForumTopics::Topics(forum_topics) = forum_topics;
+        let topic_messages = forum_topics.messages;
+
+        Ok(forum_topics
+            .topics
+            .into_iter()
+            .take(limit)
+            .filter_map(|topic| map_forum_topic(parent_dialog_id, topic, &topic_messages))
+            .collect())
+    }
+
     pub async fn fetch_messages(&self, chat_id: &ChatId, limit: usize) -> Result<Vec<Message>> {
+        let target = parse_chat_target(chat_id)?;
         let peer = self
             .find_peer_ref(chat_id)
             .await?
             .ok_or_else(|| anyhow!("telegram chat `{}` not found in current dialogs", chat_id.as_str()))?;
-        let mut messages = self.client.iter_messages(peer).limit(limit);
-        let mut mapped = Vec::with_capacity(limit.min(128));
+        match target {
+            TelegramChatTarget::Dialog { .. } => {
+                let mut messages = self.client.iter_messages(peer).limit(limit);
+                let mut mapped = Vec::with_capacity(limit.min(128));
 
-        while let Some(message) = messages
-            .next()
-            .await
-            .context("failed to fetch telegram message history")?
-        {
-            mapped.push(map_message(chat_id.clone(), message));
+                while let Some(message) = messages
+                    .next()
+                    .await
+                    .context("failed to fetch telegram message history")?
+                {
+                    mapped.push(map_message(chat_id.clone(), message));
+                }
+
+                mapped.reverse();
+                Ok(mapped)
+            }
+            TelegramChatTarget::ForumTopic { top_message, .. } => {
+                info!("fetching telegram forum topic history for {}", chat_id.as_str());
+                self.fetch_forum_topic_messages(chat_id, peer, top_message, limit)
+                    .await
+            }
         }
-
-        mapped.reverse();
-        Ok(mapped)
     }
 
     async fn find_peer_ref(&self, chat_id: &ChatId) -> Result<Option<PeerRef>> {
@@ -450,18 +518,11 @@ impl TelegramFetchClient {
             return Ok(None);
         };
 
-        let mut dialogs = self.client.iter_dialogs();
-        while let Some(dialog) = dialogs
-            .next()
-            .await
-            .context("failed to search telegram dialogs for peer")?
-        {
-            if dialog.peer().id().bot_api_dialog_id() == dialog_id {
-                return Ok(Some(dialog.peer_ref()));
-            }
+        if let Some(peer_ref) = self.peer_refs.read().await.get(&dialog_id).copied() {
+            return Ok(Some(peer_ref));
         }
 
-        Ok(None)
+        Ok(self.peer_ref_from_dialog_id(dialog_id))
     }
 
     pub async fn send_text(&self, chat_id: &ChatId, text: &str) -> Result<Message> {
@@ -470,17 +531,73 @@ impl TelegramFetchClient {
             return Err(anyhow!("message text must not be empty"));
         }
 
+        let target = parse_chat_target(chat_id)?;
         let peer = self
             .find_peer_ref(chat_id)
             .await?
             .ok_or_else(|| anyhow!("telegram chat `{}` not found in current dialogs", chat_id.as_str()))?;
-        let sent = self
-            .client
-            .send_message(peer, text)
-            .await
-            .context("failed to send telegram text message")?;
+        let sent = match target {
+            TelegramChatTarget::Dialog { .. } => self
+                .client
+                .send_message(peer, text)
+                .await
+                .context("failed to send telegram text message")?,
+            TelegramChatTarget::ForumTopic { top_message, .. } => {
+                info!("sending telegram forum topic message to {}", chat_id.as_str());
+                self.client
+                    .send_message(peer, InputMessage::new().text(text).reply_to(Some(top_message)))
+                    .await
+                    .context("failed to send telegram forum topic message")?
+            }
+        };
 
         Ok(map_message(chat_id.clone(), sent))
+    }
+
+    async fn fetch_forum_topic_messages(
+        &self,
+        chat_id: &ChatId,
+        peer: PeerRef,
+        top_message: i32,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let response = self
+            .client
+            .invoke(&tl::functions::messages::GetReplies {
+                peer: peer.into(),
+                msg_id: top_message,
+                offset_id: 0,
+                offset_date: 0,
+                add_offset: 0,
+                limit: limit.min(i32::MAX as usize) as i32,
+                max_id: 0,
+                min_id: 0,
+                hash: 0,
+            })
+            .await
+            .context("failed to fetch telegram forum topic replies")?;
+
+        let (messages, users, chats) = unpack_messages_response(response)?;
+        let author_names = build_author_names(users, chats);
+        let mut mapped = messages
+            .into_iter()
+            .map(|message| map_raw_message(chat_id.clone(), message, &author_names))
+            .collect::<Vec<_>>();
+        mapped.sort_by_key(|message| {
+            message
+                .sent_at
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+        });
+        Ok(mapped)
+    }
+
+    fn peer_ref_from_dialog_id(&self, dialog_id: i64) -> Option<PeerRef> {
+        let peer_id = peer_id_from_dialog_id(dialog_id)?;
+        Some(PeerRef {
+            id: peer_id,
+            auth: grammers_session::types::PeerAuth::default(),
+        })
     }
 }
 
@@ -526,12 +643,13 @@ fn map_dialog(dialog: Dialog) -> ChatSummary {
         .map(|message| timestamp_to_system_time(message.date().timestamp()));
 
     ChatSummary {
-        id: ChatId::new(format!("telegram:{}", peer.id().bot_api_dialog_id())),
+        id: dialog_chat_id(peer.id().bot_api_dialog_id()),
         service: Service::Telegram,
         title,
         last_message_preview,
         unread_count: dialog_unread_count(&dialog) as u32,
         last_activity_at,
+        has_subchats: forum_enabled_group(peer),
     }
 }
 
@@ -558,6 +676,239 @@ fn map_message(chat_id: ChatId, message: grammers_client::message::Message) -> M
     }
 }
 
+fn map_forum_topic(
+    parent_dialog_id: i64,
+    topic: tl::enums::ForumTopic,
+    messages: &[tl::enums::Message],
+) -> Option<ChatSummary> {
+    let tl::enums::ForumTopic::Topic(topic) = topic else {
+        return None;
+    };
+    let topic_message = messages.iter().find(|message| message.id() == topic.top_message);
+    let last_message_preview = topic_message
+        .and_then(raw_message_text)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned);
+    let last_activity_at = topic_message
+        .map(raw_message_timestamp)
+        .map(|timestamp| timestamp_to_system_time(timestamp as i64))
+        .or_else(|| Some(timestamp_to_system_time(topic.date as i64)));
+
+    Some(ChatSummary {
+        id: forum_topic_chat_id(parent_dialog_id, topic.id),
+        service: Service::Telegram,
+        title: topic.title,
+        last_message_preview,
+        unread_count: topic.unread_count.max(0) as u32,
+        last_activity_at,
+        has_subchats: false,
+    })
+}
+
+fn map_raw_message(
+    chat_id: ChatId,
+    raw: tl::enums::Message,
+    author_names: &std::collections::HashMap<String, String>,
+) -> Message {
+    let author_name = raw_message_sender_key(&raw)
+        .and_then(|key| author_names.get(&key).cloned())
+        .unwrap_or_else(|| {
+            if raw_message_outgoing(&raw) {
+                "You".to_owned()
+            } else {
+                "Telegram".to_owned()
+            }
+        });
+
+    Message {
+        id: MessageId::new(format!("telegram:{}:{}", chat_id.as_str(), raw.id())),
+        chat_id,
+        service: Service::Telegram,
+        author_name,
+        text: raw_message_text(&raw).unwrap_or_default().to_owned(),
+        sent_at: timestamp_to_system_time(raw_message_timestamp(&raw) as i64),
+        is_outgoing: raw_message_outgoing(&raw),
+    }
+}
+
+fn build_author_names(
+    users: Vec<tl::enums::User>,
+    chats: Vec<tl::enums::Chat>,
+) -> std::collections::HashMap<String, String> {
+    let mut author_names = std::collections::HashMap::new();
+
+    for user in users {
+        let key = match &user {
+            tl::enums::User::User(user) => format!("user:{}", user.id),
+            tl::enums::User::Empty(user) => format!("user:{}", user.id),
+        };
+        let label = user_display_name(&user).unwrap_or_else(|| key.clone());
+        author_names.insert(key, label);
+    }
+
+    for chat in chats {
+        match &chat {
+            tl::enums::Chat::Chat(chat) => {
+                author_names.insert(format!("chat:{}", chat.id), chat.title.clone());
+            }
+            tl::enums::Chat::Forbidden(chat) => {
+                author_names.insert(format!("chat:{}", chat.id), chat.title.clone());
+            }
+            tl::enums::Chat::Channel(channel) => {
+                author_names.insert(format!("channel:{}", channel.id), channel.title.clone());
+            }
+            tl::enums::Chat::ChannelForbidden(channel) => {
+                author_names.insert(format!("channel:{}", channel.id), channel.title.clone());
+            }
+            tl::enums::Chat::Empty(chat) => {
+                author_names.insert(format!("chat:{}", chat.id), format!("Chat {}", chat.id));
+            }
+        }
+    }
+
+    author_names
+}
+
+fn unpack_messages_response(
+    response: tl::enums::messages::Messages,
+) -> Result<(Vec<tl::enums::Message>, Vec<tl::enums::User>, Vec<tl::enums::Chat>)> {
+    let unpacked = match response {
+        tl::enums::messages::Messages::Messages(messages) => {
+            (messages.messages, messages.users, messages.chats)
+        }
+        tl::enums::messages::Messages::Slice(messages) => {
+            (messages.messages, messages.users, messages.chats)
+        }
+        tl::enums::messages::Messages::ChannelMessages(messages) => {
+            (messages.messages, messages.users, messages.chats)
+        }
+        tl::enums::messages::Messages::NotModified(_) => {
+            return Err(anyhow!("telegram returned an unexpected not-modified message slice"));
+        }
+    };
+
+    Ok(unpacked)
+}
+
+fn raw_message_sender_key(raw: &tl::enums::Message) -> Option<String> {
+    match raw {
+        tl::enums::Message::Message(message) => message.from_id.as_ref().map(peer_key),
+        tl::enums::Message::Service(message) => message.from_id.as_ref().map(peer_key),
+        tl::enums::Message::Empty(_) => None,
+    }
+}
+
+fn raw_message_text(raw: &tl::enums::Message) -> Option<&str> {
+    match raw {
+        tl::enums::Message::Message(message) => Some(message.message.as_str()),
+        tl::enums::Message::Service(_) | tl::enums::Message::Empty(_) => None,
+    }
+}
+
+fn raw_message_timestamp(raw: &tl::enums::Message) -> i32 {
+    match raw {
+        tl::enums::Message::Message(message) => message.date,
+        tl::enums::Message::Service(message) => message.date,
+        tl::enums::Message::Empty(_) => 0,
+    }
+}
+
+fn raw_message_outgoing(raw: &tl::enums::Message) -> bool {
+    match raw {
+        tl::enums::Message::Message(message) => message.out,
+        tl::enums::Message::Service(message) => message.out,
+        tl::enums::Message::Empty(_) => false,
+    }
+}
+
+fn user_display_name(user: &tl::enums::User) -> Option<String> {
+    match user {
+        tl::enums::User::User(user) => {
+            let first = user.first_name.as_deref().unwrap_or_default().trim();
+            let last = user.last_name.as_deref().unwrap_or_default().trim();
+            let joined = format!("{first} {last}").trim().to_owned();
+            if !joined.is_empty() {
+                Some(joined)
+            } else {
+                user.username.clone()
+            }
+        }
+        tl::enums::User::Empty(_) => None,
+    }
+}
+
+fn forum_enabled_group(peer: &Peer) -> bool {
+    match peer {
+        Peer::Group(group) => matches!(&group.raw, tl::enums::Chat::Channel(channel) if channel.forum),
+        Peer::User(_) | Peer::Channel(_) => false,
+    }
+}
+
+fn peer_key(peer: &tl::enums::Peer) -> String {
+    match peer {
+        tl::enums::Peer::User(user) => format!("user:{}", user.user_id),
+        tl::enums::Peer::Chat(chat) => format!("chat:{}", chat.chat_id),
+        tl::enums::Peer::Channel(channel) => format!("channel:{}", channel.channel_id),
+    }
+}
+
+fn dialog_chat_id(dialog_id: i64) -> ChatId {
+    ChatId::new(format!("telegram:{dialog_id}"))
+}
+
+fn forum_topic_chat_id(dialog_id: i64, top_message: i32) -> ChatId {
+    ChatId::new(format!("telegram:{dialog_id}:topic:{top_message}"))
+}
+
+fn peer_id_from_dialog_id(dialog_id: i64) -> Option<PeerId> {
+    if dialog_id == 0 {
+        return None;
+    }
+
+    Some(match dialog_id {
+        1..=0xffffffffff => PeerId::user_unchecked(dialog_id),
+        -999999999999..=-1 => PeerId::chat_unchecked(-dialog_id),
+        _ => {
+            let bare_id = -dialog_id - 1_000_000_000_000;
+            if bare_id <= 0 {
+                return None;
+            }
+            PeerId::channel_unchecked(bare_id)
+        }
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TelegramChatTarget {
+    Dialog { dialog_id: i64 },
+    ForumTopic { dialog_id: i64, top_message: i32 },
+}
+
+fn parse_chat_target(chat_id: &ChatId) -> Result<TelegramChatTarget> {
+    let raw = chat_id.as_str();
+    let Some(rest) = raw.strip_prefix("telegram:") else {
+        return Err(anyhow!("unsupported telegram chat id `{raw}`"));
+    };
+
+    if let Some((dialog_id, top_message)) = rest.split_once(":topic:") {
+        return Ok(TelegramChatTarget::ForumTopic {
+            dialog_id: dialog_id
+                .parse()
+                .with_context(|| format!("invalid telegram dialog id in `{raw}`"))?,
+            top_message: top_message
+                .parse()
+                .with_context(|| format!("invalid telegram topic id in `{raw}`"))?,
+        });
+    }
+
+    Ok(TelegramChatTarget::Dialog {
+        dialog_id: rest
+            .parse()
+            .with_context(|| format!("invalid telegram dialog id in `{raw}`"))?,
+    })
+}
+
 fn peer_label(peer: &Peer) -> Option<String> {
     peer.name()
         .map(str::to_owned)
@@ -580,5 +931,9 @@ fn timestamp_to_system_time(timestamp: i64) -> SystemTime {
 }
 
 fn parse_dialog_id(chat_id: &str) -> Option<i64> {
-    chat_id.strip_prefix("telegram:")?.parse().ok()
+    let target = parse_chat_target(&ChatId::new(chat_id)).ok()?;
+    Some(match target {
+        TelegramChatTarget::Dialog { dialog_id } => dialog_id,
+        TelegramChatTarget::ForumTopic { dialog_id, .. } => dialog_id,
+    })
 }

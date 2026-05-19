@@ -54,6 +54,7 @@ pub struct ChatSummary {
     pub last_message_preview: Option<String>,
     pub unread_count: u32,
     pub last_activity_at: Option<SystemTime>,
+    pub has_subchats: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

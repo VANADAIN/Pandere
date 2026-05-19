@@ -12,11 +12,13 @@ use pandere_plugin_telegram::{
 };
 use ratatui::{Frame, Terminal, prelude::CrosstermBackend};
 use tokio::sync::mpsc;
+use tracing::info;
 
 use crate::{
     data_source::MessengerDataSource,
     data_source::{AuthStatus, SyncStatus},
     fixtures::FixtureMessengerSource,
+    logs::LogBuffer,
     state::{AppState, LoginInputMode},
     ui,
 };
@@ -26,16 +28,22 @@ pub enum Screen {
     Main,
     Login,
     Messenger,
+    Logs,
 }
 
 pub struct App {
     state: AppState,
     telegram_config: Option<TelegramConfig>,
     telegram: Option<TelegramClient>,
+    log_buffer: LogBuffer,
     fetch_tx: mpsc::UnboundedSender<ThreadFetchResult>,
     fetch_rx: mpsc::UnboundedReceiver<ThreadFetchResult>,
+    forum_threads_tx: mpsc::UnboundedSender<ForumThreadsFetchResult>,
+    forum_threads_rx: mpsc::UnboundedReceiver<ForumThreadsFetchResult>,
     pending_thread_fetch: Option<PendingThreadFetch>,
+    pending_forum_threads_fetch: Option<PendingForumThreadsFetch>,
     in_flight_threads: HashSet<ChatId>,
+    in_flight_forum_threads: HashSet<ChatId>,
 }
 
 impl App {
@@ -43,16 +51,23 @@ impl App {
         state: AppState,
         telegram_config: Option<TelegramConfig>,
         telegram: Option<TelegramClient>,
+        log_buffer: LogBuffer,
     ) -> Self {
         let (fetch_tx, fetch_rx) = mpsc::unbounded_channel();
+        let (forum_threads_tx, forum_threads_rx) = mpsc::unbounded_channel();
         Self {
             state,
             telegram_config,
             telegram,
+            log_buffer,
             fetch_tx,
             fetch_rx,
+            forum_threads_tx,
+            forum_threads_rx,
             pending_thread_fetch: None,
+            pending_forum_threads_fetch: None,
             in_flight_threads: HashSet::new(),
+            in_flight_forum_threads: HashSet::new(),
         }
     }
 
@@ -69,7 +84,9 @@ impl App {
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ) -> Result<()> {
         loop {
+            self.process_forum_thread_results();
             self.process_thread_results();
+            self.maybe_start_pending_forum_threads_fetch();
             self.maybe_start_pending_thread_fetch();
             terminal.draw(|frame| self.draw(frame))?;
 
@@ -141,16 +158,23 @@ impl App {
                 KeyCode::Char('1') => self.state.screen = Screen::Main,
                 KeyCode::Char('2') => self.state.screen = Screen::Login,
                 KeyCode::Char('3') => self.state.screen = Screen::Messenger,
+                KeyCode::Char('0') => self.state.screen = Screen::Logs,
                 KeyCode::Char('c') if self.state.screen == Screen::Messenger => {
                     self.state.activate_composer();
                 }
                 KeyCode::Up if self.state.screen == Screen::Messenger => {
-                    self.state.select_previous_chat();
-                    self.schedule_selected_thread_fetch();
+                    self.handle_messenger_up();
                 }
                 KeyCode::Down if self.state.screen == Screen::Messenger => {
-                    self.state.select_next_chat();
-                    self.schedule_selected_thread_fetch();
+                    self.handle_messenger_down();
+                }
+                KeyCode::Right if self.state.screen == Screen::Messenger => {
+                    self.state.enter_selected_root();
+                    self.schedule_preview_fetch();
+                }
+                KeyCode::Left if self.state.screen == Screen::Messenger => {
+                    self.state.leave_group_threads();
+                    self.schedule_preview_fetch();
                 }
                 _ => {}
             }
@@ -160,20 +184,7 @@ impl App {
     }
 
     fn draw(&self, frame: &mut Frame) {
-        ui::draw_app(
-            frame,
-            self.state.screen,
-            &self.state.plugin_cards(),
-            &self.state.chat_previews(),
-            self.state.chats(),
-            &self.state.messages(),
-            &self.state.login_lines(),
-            self.state.selected_chat_index(),
-            &self.state.thread_status_label(),
-            self.state.composer_active,
-            &self.state.composer_input,
-            self.state.composer_notice.as_deref(),
-        );
+        ui::draw_app(frame, &self.state, &self.log_buffer.snapshot(500));
     }
 
     async fn refresh_telegram_state(&mut self) -> Result<()> {
@@ -191,9 +202,9 @@ impl App {
             TelegramAuthStatus::Authorized { user_label } => {
                 self.state.source.auth_status = AuthStatus::Authenticated(user_label);
                 self.state.source.sync_status = SyncStatus::Idle;
-                self.state.source.chats = telegram.list_chats(25).await?;
-                self.state.selected_chat_id = self.state.source.chats.first().map(|chat| chat.id.clone());
-                self.schedule_selected_thread_fetch();
+                self.state.source.chats = telegram.list_chats(500).await?;
+                self.state.reset_messenger_selection();
+                self.schedule_preview_fetch();
             }
             TelegramAuthStatus::NeedsLogin | TelegramAuthStatus::Connected => {
                 let fixture = FixtureMessengerSource.snapshot()?;
@@ -202,7 +213,7 @@ impl App {
                 self.state.source.chats = fixture.chats;
                 self.state.thread_cache = crate::state::build_thread_cache(&fixture.messages);
                 self.state.source.messages = fixture.messages;
-                self.state.selected_chat_id = self.state.source.chats.first().map(|chat| chat.id.clone());
+                self.state.reset_messenger_selection();
                 self.state.thread_status = crate::state::ThreadStatus::Idle;
             }
         }
@@ -216,6 +227,7 @@ impl App {
             return Ok(());
         };
 
+        info!("requesting telegram login code");
         telegram.request_login_code_state().await?;
         self.state.clear_login_notice();
         self.refresh_telegram_state().await
@@ -252,6 +264,7 @@ impl App {
 
         match result {
             Ok(_) => {
+                info!("telegram login step completed");
                 self.state.clear_login_input();
                 self.state.clear_login_notice();
                 self.refresh_telegram_state().await
@@ -269,6 +282,7 @@ impl App {
             return Ok(());
         };
 
+        info!("clearing telegram session");
         self.telegram = None;
         clear_session_file(&config.session_path)?;
 
@@ -277,26 +291,82 @@ impl App {
         self.state.clear_login_input();
         self.state.set_login_notice("telegram session cleared");
         self.in_flight_threads.clear();
+        self.in_flight_forum_threads.clear();
         self.pending_thread_fetch = None;
+        self.pending_forum_threads_fetch = None;
         self.refresh_telegram_state().await
     }
 
-    fn schedule_selected_thread_fetch(&mut self) {
-        let Some(chat_id) = self.state.selected_chat_id.clone() else {
+    fn schedule_preview_fetch(&mut self) {
+        if !self.state.is_inside_group_threads() && self.state.selected_root_has_threads() {
+            let Some(root_chat_id) = self.state.selected_root_chat_id.clone() else {
+                return;
+            };
+
+            if self.state.apply_cached_forum_threads() {
+                self.pending_forum_threads_fetch = None;
+                return;
+            }
+
+            self.state.set_forum_threads_loading();
+            self.pending_forum_threads_fetch = Some(PendingForumThreadsFetch {
+                root_chat_id,
+                requested_at: Instant::now() + Duration::from_millis(150),
+            });
+            self.pending_thread_fetch = None;
+            self.state.source.messages.clear();
+            return;
+        };
+
+        let Some(chat_id) = self.state.preview_chat_id() else {
             self.state.source.messages.clear();
             self.pending_thread_fetch = None;
             return;
         };
 
         if self.state.apply_cached_thread() {
+            info!(chat_id = %chat_id.as_str(), "using cached thread");
             self.pending_thread_fetch = None;
             return;
         }
 
+        info!(chat_id = %chat_id.as_str(), "scheduled thread fetch");
         self.state.set_thread_loading();
         self.pending_thread_fetch = Some(PendingThreadFetch {
             chat_id,
             requested_at: Instant::now() + Duration::from_millis(150),
+        });
+    }
+
+    fn maybe_start_pending_forum_threads_fetch(&mut self) {
+        let Some(pending) = self.pending_forum_threads_fetch.as_ref() else {
+            return;
+        };
+
+        if Instant::now() < pending.requested_at {
+            return;
+        }
+
+        let Some(telegram) = self.telegram.as_ref() else {
+            self.pending_forum_threads_fetch = None;
+            return;
+        };
+
+        let root_chat_id = pending.root_chat_id.clone();
+        if self.in_flight_forum_threads.contains(&root_chat_id) {
+            self.pending_forum_threads_fetch = None;
+            return;
+        }
+
+        let tx = self.forum_threads_tx.clone();
+        let fetch_client = telegram.fetch_client();
+        self.in_flight_forum_threads.insert(root_chat_id.clone());
+        self.pending_forum_threads_fetch = None;
+        info!(chat_id = %root_chat_id.as_str(), "starting forum thread list fetch");
+
+        tokio::spawn(async move {
+            let result = fetch_client.list_forum_topics(&root_chat_id, 500).await;
+            let _ = tx.send(ForumThreadsFetchResult { root_chat_id, result });
         });
     }
 
@@ -324,6 +394,7 @@ impl App {
         let tx = self.fetch_tx.clone();
         self.in_flight_threads.insert(chat_id.clone());
         self.pending_thread_fetch = None;
+        info!(chat_id = %chat_id.as_str(), "starting thread fetch");
 
         tokio::spawn(async move {
             let result = fetch_client.fetch_messages(&chat_id, 50).await;
@@ -337,11 +408,51 @@ impl App {
 
             match result.result {
                 Ok(messages) => {
+                    info!(
+                        chat_id = %result.chat_id.as_str(),
+                        message_count = messages.len(),
+                        "thread fetch completed"
+                    );
                     self.state.cache_thread(result.chat_id, messages);
                 }
                 Err(error) => {
-                    if self.state.selected_chat_id.as_ref() == Some(&result.chat_id) {
+                    info!(
+                        chat_id = %result.chat_id.as_str(),
+                        error = %error,
+                        "thread fetch failed"
+                    );
+                    if self.state.preview_chat_id().as_ref() == Some(&result.chat_id) {
                         self.state.set_thread_failed(error.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    fn process_forum_thread_results(&mut self) {
+        while let Ok(result) = self.forum_threads_rx.try_recv() {
+            self.in_flight_forum_threads.remove(&result.root_chat_id);
+
+            match result.result {
+                Ok(threads) => {
+                    info!(
+                        chat_id = %result.root_chat_id.as_str(),
+                        thread_count = threads.len(),
+                        "forum thread list fetch completed"
+                    );
+                    self.state.cache_forum_threads(result.root_chat_id, threads);
+                    if !self.state.is_inside_group_threads() {
+                        let _ = self.state.apply_cached_thread();
+                    }
+                }
+                Err(error) => {
+                    info!(
+                        chat_id = %result.root_chat_id.as_str(),
+                        error = %error,
+                        "forum thread list fetch failed"
+                    );
+                    if self.state.selected_root_chat_id.as_ref() == Some(&result.root_chat_id) {
+                        self.state.set_forum_threads_failed(error.to_string());
                     }
                 }
             }
@@ -354,7 +465,7 @@ impl App {
             return Ok(());
         };
 
-        let Some(chat_id) = self.state.selected_chat_id.clone() else {
+        let Some(chat_id) = self.state.active_chat_id() else {
             self.state.set_composer_notice("no chat selected");
             return Ok(());
         };
@@ -367,6 +478,7 @@ impl App {
 
         match telegram.send_text(&chat_id, &text).await {
             Ok(_) => {
+                info!(chat_id = %chat_id.as_str(), "sent telegram text message");
                 self.state.clear_composer();
                 self.state.clear_composer_notice();
                 self.state.deactivate_composer();
@@ -374,6 +486,7 @@ impl App {
                 self.schedule_force_thread_refresh(chat_id);
             }
             Err(error) => {
+                info!(chat_id = %chat_id.as_str(), error = %error, "failed to send telegram text message");
                 self.state.set_composer_notice(error.to_string());
             }
         }
@@ -388,6 +501,24 @@ impl App {
             requested_at: Instant::now(),
         });
     }
+
+    fn handle_messenger_up(&mut self) {
+        if self.state.is_inside_group_threads() {
+            self.state.select_previous_thread_chat();
+        } else {
+            self.state.select_previous_root_chat();
+        }
+        self.schedule_preview_fetch();
+    }
+
+    fn handle_messenger_down(&mut self) {
+        if self.state.is_inside_group_threads() {
+            self.state.select_next_thread_chat();
+        } else {
+            self.state.select_next_root_chat();
+        }
+        self.schedule_preview_fetch();
+    }
 }
 
 struct PendingThreadFetch {
@@ -395,7 +526,17 @@ struct PendingThreadFetch {
     requested_at: Instant,
 }
 
+struct PendingForumThreadsFetch {
+    root_chat_id: ChatId,
+    requested_at: Instant,
+}
+
 struct ThreadFetchResult {
     chat_id: ChatId,
     result: Result<Vec<pandere_core::Message>>,
+}
+
+struct ForumThreadsFetchResult {
+    root_chat_id: ChatId,
+    result: Result<Vec<pandere_core::ChatSummary>>,
 }

@@ -15,6 +15,7 @@ pub fn fixture_chats() -> Vec<ChatSummary> {
             last_message_preview: Some("WIT draft small. Good.".into()),
             unread_count: 3,
             last_activity_at: Some(SystemTime::now()),
+            has_subchats: false,
         },
         ChatSummary {
             id: ChatId::new("telegram:ops"),
@@ -23,6 +24,7 @@ pub fn fixture_chats() -> Vec<ChatSummary> {
             last_message_preview: Some("Need signed plugin artifacts next.".into()),
             unread_count: 0,
             last_activity_at: Some(SystemTime::now()),
+            has_subchats: false,
         },
         ChatSummary {
             id: ChatId::new("telegram:personal"),
@@ -31,6 +33,7 @@ pub fn fixture_chats() -> Vec<ChatSummary> {
             last_message_preview: Some("Telegram login spike after shell.".into()),
             unread_count: 1,
             last_activity_at: Some(SystemTime::now()),
+            has_subchats: false,
         },
     ]
 }

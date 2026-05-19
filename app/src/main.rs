@@ -1,6 +1,7 @@
 mod app;
 mod data_source;
 mod fixtures;
+mod logs;
 mod plugin;
 mod state;
 mod terminal;
@@ -10,11 +11,12 @@ use anyhow::Result;
 use pandere_core::paths::pandere_paths;
 use pandere_plugin_telegram::{TelegramClient, TelegramConfig};
 use tracing::info;
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::{EnvFilter, prelude::*};
 
 use crate::{
     app::App,
     fixtures::HostBackedFixtureSource,
+    logs::{LogBuffer, LogBufferLayer},
     plugin::bootstrap_dummy_registry,
     state::AppState,
     terminal::TerminalGuard,
@@ -22,9 +24,11 @@ use crate::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .compact()
+    let log_buffer = LogBuffer::default();
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(LogBufferLayer::new(log_buffer.clone()))
         .init();
 
     info!("starting pandere host-backed shell");
@@ -48,7 +52,7 @@ async fn main() -> Result<()> {
             .expect("dummy registry should contain a messenger"),
     );
     let state = AppState::new(source, registry)?;
-    let mut app = App::new(state, telegram_config, telegram);
+    let mut app = App::new(state, telegram_config, telegram, log_buffer);
     app.initialize().await?;
     let mut terminal = TerminalGuard::setup()?;
     app.run(terminal.terminal()).await
