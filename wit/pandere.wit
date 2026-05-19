@@ -15,6 +15,7 @@ interface types {
     record auth-status {
         is-authenticated: bool,
         account-label: option<string>,
+        session-handle: option<string>,
     }
 
     record chat-summary {
@@ -44,10 +45,42 @@ interface types {
         next-cursor: option<sync-cursor>,
     }
 
+    record search-query {
+        text: string,
+        limit: u32,
+    }
+
+    record search-result {
+        message: message,
+        score: option<f32>,
+    }
+
     record retention-hints {
         can-persist-locally: bool,
         suggested-message-ttl-secs: option<u64>,
         suggested-media-ttl-secs: option<u64>,
+    }
+
+    record kv-entry {
+        key: string,
+        value: string,
+    }
+
+    record secret-ref {
+        handle: string,
+    }
+
+    record http-request {
+        method: string,
+        url: string,
+        headers: list<kv-entry>,
+        body: option<list<u8>>,
+    }
+
+    record http-response {
+        status: u16,
+        headers: list<kv-entry>,
+        body: list<u8>,
     }
 
     variant plugin-error {
@@ -60,12 +93,19 @@ interface types {
 }
 
 interface host {
-    log: func(level: string, message: string);
+    use types::{http-request, http-response, plugin-error, secret-ref};
+
     now-unix-secs: func() -> u64;
+    log: func(level: string, message: string);
+    load-session: func(key: string) -> option<string>;
+    store-session: func(key: string, value: string);
+    load-secret: func(handle: secret-ref) -> result<string, plugin-error>;
+    store-secret: func(label: string, value: string) -> result<secret-ref, plugin-error>;
+    send-http: func(request: http-request) -> result<http-response, plugin-error>;
 }
 
 interface plugin {
-    use types.{auth-status, chat-summary, message, plugin-error, plugin-metadata, retention-hints, sync-cursor, sync-page};
+    use types::{auth-status, chat-summary, message, plugin-error, plugin-metadata, retention-hints, search-query, search-result, sync-cursor, sync-page};
 
     metadata: func() -> plugin-metadata;
     auth-status: func() -> result<auth-status, plugin-error>;
@@ -73,6 +113,7 @@ interface plugin {
     list-chats: func() -> result<list<chat-summary>, plugin-error>;
     fetch-messages: func(chat-id: string, cursor: option<sync-cursor>) -> result<sync-page, plugin-error>;
     sync-updates: func(cursor: option<sync-cursor>) -> result<sync-page, plugin-error>;
+    search-messages: func(query: search-query, chat-id: option<string>) -> result<list<search-result>, plugin-error>;
     send-text: func(chat-id: string, text: string) -> result<message, plugin-error>;
     retention-hints: func() -> retention-hints;
 }
