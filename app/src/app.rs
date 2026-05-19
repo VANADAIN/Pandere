@@ -101,6 +101,14 @@ impl App {
                 KeyCode::Char('1') => self.state.screen = Screen::Main,
                 KeyCode::Char('2') => self.state.screen = Screen::Login,
                 KeyCode::Char('3') => self.state.screen = Screen::Messenger,
+                KeyCode::Up if self.state.screen == Screen::Messenger => {
+                    self.state.select_previous_chat();
+                    self.refresh_selected_messages().await?;
+                }
+                KeyCode::Down if self.state.screen == Screen::Messenger => {
+                    self.state.select_next_chat();
+                    self.refresh_selected_messages().await?;
+                }
                 _ => {}
             }
         }
@@ -117,6 +125,7 @@ impl App {
             self.state.chats(),
             &self.state.messages(),
             &self.state.login_lines(),
+            self.state.selected_chat_index(),
         );
     }
 
@@ -136,8 +145,8 @@ impl App {
                 self.state.source.auth_status = AuthStatus::Authenticated(user_label);
                 self.state.source.sync_status = SyncStatus::Idle;
                 self.state.source.chats = telegram.list_chats(25).await?;
-                self.state.source.messages.clear();
                 self.state.selected_chat_id = self.state.source.chats.first().map(|chat| chat.id.clone());
+                self.refresh_selected_messages().await?;
             }
             TelegramAuthStatus::NeedsLogin | TelegramAuthStatus::Connected => {
                 let fixture = FixtureMessengerSource.snapshot()?;
@@ -219,5 +228,23 @@ impl App {
         self.state.clear_login_input();
         self.state.set_login_notice("telegram session cleared");
         self.refresh_telegram_state().await
+    }
+
+    async fn refresh_selected_messages(&mut self) -> Result<()> {
+        let Some(telegram) = self.telegram.as_mut() else {
+            return Ok(());
+        };
+
+        if !matches!(telegram.auth_status().await?, TelegramAuthStatus::Authorized { .. }) {
+            return Ok(());
+        }
+
+        let Some(chat_id) = self.state.selected_chat_id.clone() else {
+            self.state.source.messages.clear();
+            return Ok(());
+        };
+
+        self.state.source.messages = telegram.fetch_messages(&chat_id, 50).await?;
+        Ok(())
     }
 }

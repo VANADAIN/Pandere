@@ -18,6 +18,7 @@ pub fn draw_app(
     chats: &[ChatSummary],
     messages: &[Message],
     login_lines: &[String],
+    selected_chat_index: Option<usize>,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -36,10 +37,10 @@ pub fn draw_app(
     match screen {
         Screen::Main => draw_main(frame, chunks[1], plugin_cards, chat_previews),
         Screen::Login => draw_login(frame, chunks[1], login_lines),
-        Screen::Messenger => draw_messenger(frame, chunks[1], chats, messages),
+        Screen::Messenger => draw_messenger(frame, chunks[1], chats, messages, selected_chat_index),
     }
 
-    let footer = Paragraph::new("1 Main  2 Login  3 Messenger  Enter Next/Submit  r Refresh Code  x Logout  q Quit")
+    let footer = Paragraph::new("1 Main  2 Login  3 Messenger  Enter Next/Submit  r Refresh Code  x Logout  Up/Down Chat  q Quit")
         .block(Block::default().borders(Borders::ALL).title("Keys"));
     frame.render_widget(footer, chunks[2]);
 }
@@ -101,15 +102,22 @@ fn draw_login(frame: &mut Frame, area: Rect, login_lines: &[String]) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_messenger(frame: &mut Frame, area: Rect, chats: &[ChatSummary], messages: &[Message]) {
+fn draw_messenger(
+    frame: &mut Frame,
+    area: Rect,
+    chats: &[ChatSummary],
+    messages: &[Message],
+    selected_chat_index: Option<usize>,
+) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
         .split(area);
 
-    let chats = chats.iter().map(|chat| {
-        let marker = if chat.unread_count > 0 { "*" } else { " " };
-        ListItem::new(format!("{marker} {}", chat.title))
+    let chats = chats.iter().enumerate().map(|(index, chat)| {
+        let unread_marker = if chat.unread_count > 0 { "*" } else { " " };
+        let selected_marker = if Some(index) == selected_chat_index { ">" } else { " " };
+        ListItem::new(format!("{selected_marker}{unread_marker} {}", chat.title))
     });
     let chat_list =
         List::new(chats.collect::<Vec<_>>()).block(Block::default().borders(Borders::ALL).title("Dialogs"));

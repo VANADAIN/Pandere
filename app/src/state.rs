@@ -177,6 +177,36 @@ impl AppState {
         }
     }
 
+    pub fn selected_chat_index(&self) -> Option<usize> {
+        let selected = self.selected_chat_id.as_ref()?;
+        self.source
+            .chats
+            .iter()
+            .position(|chat| &chat.id == selected)
+    }
+
+    pub fn select_next_chat(&mut self) {
+        if self.source.chats.is_empty() {
+            self.selected_chat_id = None;
+            return;
+        }
+
+        let current = self.selected_chat_index().unwrap_or(0);
+        let next = (current + 1).min(self.source.chats.len() - 1);
+        self.selected_chat_id = Some(self.source.chats[next].id.clone());
+    }
+
+    pub fn select_previous_chat(&mut self) {
+        if self.source.chats.is_empty() {
+            self.selected_chat_id = None;
+            return;
+        }
+
+        let current = self.selected_chat_index().unwrap_or(0);
+        let previous = current.saturating_sub(1);
+        self.selected_chat_id = Some(self.source.chats[previous].id.clone());
+    }
+
     pub fn login_lines(&self) -> Vec<String> {
         let plugin = self.registry.primary().cloned().unwrap_or_else(fallback_messenger);
         let component_path = plugin

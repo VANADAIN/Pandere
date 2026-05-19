@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fs, io, path::PathBuf};
 
 use directories::{BaseDirs, ProjectDirs};
 
@@ -10,12 +10,29 @@ pub struct PanderePaths {
 }
 
 impl PanderePaths {
+    pub fn plugin_install_dir(&self) -> PathBuf {
+        self.data_dir.join("plugins")
+    }
+
     pub fn telegram_session_path(&self) -> PathBuf {
         self.data_dir.join("telegram").join("session.sqlite")
     }
 
     pub fn plugin_data_dir(&self, plugin_id: &str) -> PathBuf {
-        self.data_dir.join("plugins").join(plugin_id)
+        self.plugin_install_dir().join(plugin_id)
+    }
+
+    pub fn media_cache_dir(&self) -> PathBuf {
+        self.cache_dir.join("media")
+    }
+
+    pub fn ensure_exists(&self) -> io::Result<()> {
+        fs::create_dir_all(&self.config_dir)?;
+        fs::create_dir_all(&self.data_dir)?;
+        fs::create_dir_all(&self.cache_dir)?;
+        fs::create_dir_all(self.plugin_install_dir())?;
+        fs::create_dir_all(self.media_cache_dir())?;
+        Ok(())
     }
 }
 

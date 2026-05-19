@@ -7,6 +7,7 @@ mod terminal;
 mod ui;
 
 use anyhow::Result;
+use pandere_core::paths::pandere_paths;
 use pandere_plugin_telegram::{TelegramClient, TelegramConfig};
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -27,6 +28,15 @@ async fn main() -> Result<()> {
         .init();
 
     info!("starting pandere host-backed shell");
+    let paths = pandere_paths();
+    paths.ensure_exists()?;
+    info!(
+        config_dir = %paths.config_dir.display(),
+        data_dir = %paths.data_dir.display(),
+        cache_dir = %paths.cache_dir.display(),
+        plugin_dir = %paths.plugin_install_dir().display(),
+        "prepared pandere runtime directories"
+    );
 
     let registry = bootstrap_dummy_registry();
     let telegram_config = maybe_load_telegram_config()?;

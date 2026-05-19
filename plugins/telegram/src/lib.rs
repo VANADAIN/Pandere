@@ -5,13 +5,13 @@ use std::{fs, io};
 
 use anyhow::{Context, Result, anyhow};
 use grammers_client::client::{LoginToken, PasswordToken};
-use grammers_client::peer::Dialog;
-use grammers_client::peer::User;
+use grammers_client::peer::{Dialog, Peer, User};
 use grammers_client::{Client, SignInError};
 use grammers_mtsender::SenderPool;
+use grammers_session::types::PeerRef;
 use grammers_session::storages::SqliteSession;
 use pandere_core::paths::pandere_paths;
-use pandere_core::{ChatId, ChatSummary, Service};
+use pandere_core::{ChatId, ChatSummary, Message, MessageId, Service};
 use tokio::task::JoinHandle;
 
 pub fn crate_name() -> &'static str {
@@ -70,6 +70,27 @@ impl TelegramConfig {
 
 pub fn default_session_path() -> PathBuf {
     pandere_paths().telegram_session_path()
+}
+
+pub fn migrate_legacy_session_file(destination: &Path) -> Result<bool> {
+    let legacy_path = PathBuf::from("telegram.session");
+    if destination.exists() || !legacy_path.exists() {
+        return Ok(false);
+    }
+
+    create_parent_dir(destination)?;
+    fs::rename(&legacy_path, destination).or_else(|rename_error| {
+        fs::copy(&legacy_path, destination)
+            .map(|_| ())
+            .and_then(|_| fs::remove_file(&legacy_path))
+            .map_err(|copy_error| {
+                anyhow!(
+                    "failed to move legacy telegram session file: rename error: {rename_error}; copy/remove error: {copy_error}"
+                )
+            })
+    })?;
+
+    Ok(true)
 }
 
 pub fn clear_session_file(path: &Path) -> Result<()> {
@@ -132,6 +153,7 @@ pub struct TelegramClient {
 impl TelegramClient {
     pub async fn connect(config: TelegramConfig) -> Result<Self> {
         config.validate()?;
+        let _ = migrate_legacy_session_file(&config.session_path)?;
         create_parent_dir(&config.session_path)?;
 
         let session = Arc::new(
@@ -381,6 +403,49 @@ impl TelegramClient {
 
         Ok(chats)
     }
+
+    pub async fn fetch_messages(&self, chat_id: &ChatId, limit: usize) -> Result<Vec<Message>> {
+        if !self.client.is_authorized().await? {
+            return Err(anyhow!("telegram client is not authorized"));
+        }
+
+        let peer = self
+            .find_peer_ref(chat_id)
+            .await?
+            .ok_or_else(|| anyhow!("telegram chat `{}` not found in current dialogs", chat_id.as_str()))?;
+        let mut messages = self.client.iter_messages(peer).limit(limit);
+        let mut mapped = Vec::with_capacity(limit.min(128));
+
+        while let Some(message) = messages
+            .next()
+            .await
+            .context("failed to fetch telegram message history")?
+        {
+            mapped.push(map_message(chat_id.clone(), message));
+        }
+
+        mapped.reverse();
+        Ok(mapped)
+    }
+
+    async fn find_peer_ref(&self, chat_id: &ChatId) -> Result<Option<PeerRef>> {
+        let Some(dialog_id) = parse_dialog_id(chat_id.as_str()) else {
+            return Ok(None);
+        };
+
+        let mut dialogs = self.client.iter_dialogs();
+        while let Some(dialog) = dialogs
+            .next()
+            .await
+            .context("failed to search telegram dialogs for peer")?
+        {
+            if dialog.peer().id().bot_api_dialog_id() == dialog_id {
+                return Ok(Some(dialog.peer_ref()));
+            }
+        }
+
+        Ok(None)
+    }
 }
 
 fn create_parent_dir(path: &Path) -> Result<()> {
@@ -434,6 +499,35 @@ fn map_dialog(dialog: Dialog) -> ChatSummary {
     }
 }
 
+fn map_message(chat_id: ChatId, message: grammers_client::message::Message) -> Message {
+    let author_name = message
+        .sender()
+        .and_then(peer_label)
+        .unwrap_or_else(|| {
+            if message.outgoing() {
+                "You".to_owned()
+            } else {
+                "Telegram".to_owned()
+            }
+        });
+
+    Message {
+        id: MessageId::new(format!("telegram:{}:{}", chat_id.as_str(), message.id())),
+        chat_id,
+        service: Service::Telegram,
+        author_name,
+        text: message.text().to_owned(),
+        sent_at: timestamp_to_system_time(message.date().timestamp()),
+        is_outgoing: message.outgoing(),
+    }
+}
+
+fn peer_label(peer: &Peer) -> Option<String> {
+    peer.name()
+        .map(str::to_owned)
+        .or_else(|| Some(peer.id().bot_api_dialog_id().to_string()))
+}
+
 fn dialog_unread_count(dialog: &Dialog) -> i32 {
     match &dialog.raw {
         grammers_client::tl::enums::Dialog::Dialog(raw) => raw.unread_count,
@@ -447,4 +541,8 @@ fn timestamp_to_system_time(timestamp: i64) -> SystemTime {
     } else {
         UNIX_EPOCH + Duration::from_secs(timestamp as u64)
     }
+}
+
+fn parse_dialog_id(chat_id: &str) -> Option<i64> {
+    chat_id.strip_prefix("telegram:")?.parse().ok()
 }
