@@ -5,3 +5,5 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow = "1.0"
+wasmtime = "33"
