@@ -1,12 +1,17 @@
-use std::time::Duration;
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode};
+use pandere_core::ChatId;
 use pandere_plugin_telegram::{
     AuthStatus as TelegramAuthStatus, LoginPhase, TelegramClient, TelegramConfig,
     clear_session_file,
 };
 use ratatui::{Frame, Terminal, prelude::CrosstermBackend};
+use tokio::sync::mpsc;
 
 use crate::{
     data_source::MessengerDataSource,
@@ -27,6 +32,10 @@ pub struct App {
     state: AppState,
     telegram_config: Option<TelegramConfig>,
     telegram: Option<TelegramClient>,
+    fetch_tx: mpsc::UnboundedSender<ThreadFetchResult>,
+    fetch_rx: mpsc::UnboundedReceiver<ThreadFetchResult>,
+    pending_thread_fetch: Option<PendingThreadFetch>,
+    in_flight_threads: HashSet<ChatId>,
 }
 
 impl App {
@@ -35,10 +44,15 @@ impl App {
         telegram_config: Option<TelegramConfig>,
         telegram: Option<TelegramClient>,
     ) -> Self {
+        let (fetch_tx, fetch_rx) = mpsc::unbounded_channel();
         Self {
             state,
             telegram_config,
             telegram,
+            fetch_tx,
+            fetch_rx,
+            pending_thread_fetch: None,
+            in_flight_threads: HashSet::new(),
         }
     }
 
@@ -55,9 +69,11 @@ impl App {
         terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     ) -> Result<()> {
         loop {
+            self.process_thread_results();
+            self.maybe_start_pending_thread_fetch();
             terminal.draw(|frame| self.draw(frame))?;
 
-            if !event::poll(Duration::from_millis(250))? {
+            if !event::poll(Duration::from_millis(50))? {
                 continue;
             }
 
@@ -103,11 +119,11 @@ impl App {
                 KeyCode::Char('3') => self.state.screen = Screen::Messenger,
                 KeyCode::Up if self.state.screen == Screen::Messenger => {
                     self.state.select_previous_chat();
-                    self.refresh_selected_messages().await?;
+                    self.schedule_selected_thread_fetch();
                 }
                 KeyCode::Down if self.state.screen == Screen::Messenger => {
                     self.state.select_next_chat();
-                    self.refresh_selected_messages().await?;
+                    self.schedule_selected_thread_fetch();
                 }
                 _ => {}
             }
@@ -126,6 +142,7 @@ impl App {
             &self.state.messages(),
             &self.state.login_lines(),
             self.state.selected_chat_index(),
+            &self.state.thread_status_label(),
         );
     }
 
@@ -146,15 +163,17 @@ impl App {
                 self.state.source.sync_status = SyncStatus::Idle;
                 self.state.source.chats = telegram.list_chats(25).await?;
                 self.state.selected_chat_id = self.state.source.chats.first().map(|chat| chat.id.clone());
-                self.refresh_selected_messages().await?;
+                self.schedule_selected_thread_fetch();
             }
             TelegramAuthStatus::NeedsLogin | TelegramAuthStatus::Connected => {
                 let fixture = FixtureMessengerSource.snapshot()?;
                 self.state.source.auth_status = AuthStatus::NeedsLogin;
                 self.state.source.sync_status = SyncStatus::Pending;
                 self.state.source.chats = fixture.chats;
+                self.state.thread_cache = crate::state::build_thread_cache(&fixture.messages);
                 self.state.source.messages = fixture.messages;
                 self.state.selected_chat_id = self.state.source.chats.first().map(|chat| chat.id.clone());
+                self.state.thread_status = crate::state::ThreadStatus::Idle;
             }
         }
 
@@ -227,24 +246,85 @@ impl App {
         self.telegram = Some(telegram);
         self.state.clear_login_input();
         self.state.set_login_notice("telegram session cleared");
+        self.in_flight_threads.clear();
+        self.pending_thread_fetch = None;
         self.refresh_telegram_state().await
     }
 
-    async fn refresh_selected_messages(&mut self) -> Result<()> {
-        let Some(telegram) = self.telegram.as_mut() else {
-            return Ok(());
-        };
-
-        if !matches!(telegram.auth_status().await?, TelegramAuthStatus::Authorized { .. }) {
-            return Ok(());
-        }
-
+    fn schedule_selected_thread_fetch(&mut self) {
         let Some(chat_id) = self.state.selected_chat_id.clone() else {
             self.state.source.messages.clear();
-            return Ok(());
+            self.pending_thread_fetch = None;
+            return;
         };
 
-        self.state.source.messages = telegram.fetch_messages(&chat_id, 50).await?;
-        Ok(())
+        if self.state.apply_cached_thread() {
+            self.pending_thread_fetch = None;
+            return;
+        }
+
+        self.state.set_thread_loading();
+        self.pending_thread_fetch = Some(PendingThreadFetch {
+            chat_id,
+            requested_at: Instant::now() + Duration::from_millis(150),
+        });
     }
+
+    fn maybe_start_pending_thread_fetch(&mut self) {
+        let Some(pending) = self.pending_thread_fetch.as_ref() else {
+            return;
+        };
+
+        if Instant::now() < pending.requested_at {
+            return;
+        }
+
+        let Some(telegram) = self.telegram.as_ref() else {
+            self.pending_thread_fetch = None;
+            return;
+        };
+
+        let chat_id = pending.chat_id.clone();
+        if self.in_flight_threads.contains(&chat_id) {
+            self.pending_thread_fetch = None;
+            return;
+        }
+
+        let fetch_client = telegram.fetch_client();
+        let tx = self.fetch_tx.clone();
+        self.in_flight_threads.insert(chat_id.clone());
+        self.pending_thread_fetch = None;
+
+        tokio::spawn(async move {
+            let result = fetch_client.fetch_messages(&chat_id, 50).await;
+            let _ = tx.send(ThreadFetchResult { chat_id, result });
+        });
+    }
+
+    fn process_thread_results(&mut self) {
+        while let Ok(result) = self.fetch_rx.try_recv() {
+            self.in_flight_threads.remove(&result.chat_id);
+
+            match result.result {
+                Ok(messages) => {
+                    self.state.cache_thread(result.chat_id, messages);
+                }
+                Err(error) => {
+                    if self.state.selected_chat_id.as_ref() == Some(&result.chat_id) {
+                        self.state.set_thread_failed(error.to_string());
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct PendingThreadFetch {
+    chat_id: ChatId,
+    requested_at: Instant,
+}
+
+struct ThreadFetchResult {
+    chat_id: ChatId,
+    result: Result<Vec<pandere_core::Message>>,
 }

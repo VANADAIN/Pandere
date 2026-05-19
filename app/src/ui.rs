@@ -19,6 +19,7 @@ pub fn draw_app(
     messages: &[Message],
     login_lines: &[String],
     selected_chat_index: Option<usize>,
+    thread_status_label: &str,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -37,7 +38,16 @@ pub fn draw_app(
     match screen {
         Screen::Main => draw_main(frame, chunks[1], plugin_cards, chat_previews),
         Screen::Login => draw_login(frame, chunks[1], login_lines),
-        Screen::Messenger => draw_messenger(frame, chunks[1], chats, messages, selected_chat_index),
+        Screen::Messenger => {
+            draw_messenger(
+                frame,
+                chunks[1],
+                chats,
+                messages,
+                selected_chat_index,
+                thread_status_label,
+            )
+        }
     }
 
     let footer = Paragraph::new("1 Main  2 Login  3 Messenger  Enter Next/Submit  r Refresh Code  x Logout  Up/Down Chat  q Quit")
@@ -108,6 +118,7 @@ fn draw_messenger(
     chats: &[ChatSummary],
     messages: &[Message],
     selected_chat_index: Option<usize>,
+    thread_status_label: &str,
 ) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -123,11 +134,26 @@ fn draw_messenger(
         List::new(chats.collect::<Vec<_>>()).block(Block::default().borders(Borders::ALL).title("Dialogs"));
     frame.render_widget(chat_list, columns[0]);
 
-    let message_lines = messages
-        .iter()
-        .map(|message| format!("{}: {}", message.author_name, message.text))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let thread = Paragraph::new(message_lines).block(Block::default().borders(Borders::ALL).title("Thread"));
+    let message_lines = if messages.is_empty() {
+        vec![Line::from(format!("Thread status: {thread_status_label}"))]
+    } else {
+        messages
+            .iter()
+            .flat_map(|message| {
+                [
+                    Line::from(format!("{}: {}", message.author_name, message.text)),
+                    Line::from(String::new()),
+                ]
+            })
+            .collect::<Vec<_>>()
+    };
+    let visible_height = columns[1].height.saturating_sub(2) as usize;
+    let scroll = message_lines.len().saturating_sub(visible_height) as u16;
+    let thread = Paragraph::new(message_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!("Thread ({thread_status_label})")),
+    )
+    .scroll((scroll, 0));
     frame.render_widget(thread, columns[1]);
 }

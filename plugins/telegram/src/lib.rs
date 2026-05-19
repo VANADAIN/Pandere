@@ -141,6 +141,11 @@ pub struct LoginState {
     pub user_label: Option<String>,
 }
 
+#[derive(Clone)]
+pub struct TelegramFetchClient {
+    client: Client,
+}
+
 pub struct TelegramClient {
     service: Service,
     config: TelegramConfig,
@@ -206,6 +211,12 @@ impl TelegramClient {
 
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    pub fn fetch_client(&self) -> TelegramFetchClient {
+        TelegramFetchClient {
+            client: self.client.clone(),
+        }
     }
 
     pub fn login_plan(&self) -> [&'static str; 4] {
@@ -405,10 +416,12 @@ impl TelegramClient {
     }
 
     pub async fn fetch_messages(&self, chat_id: &ChatId, limit: usize) -> Result<Vec<Message>> {
-        if !self.client.is_authorized().await? {
-            return Err(anyhow!("telegram client is not authorized"));
-        }
+        self.fetch_client().fetch_messages(chat_id, limit).await
+    }
+}
 
+impl TelegramFetchClient {
+    pub async fn fetch_messages(&self, chat_id: &ChatId, limit: usize) -> Result<Vec<Message>> {
         let peer = self
             .find_peer_ref(chat_id)
             .await?

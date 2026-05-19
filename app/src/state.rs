@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use pandere_core::{ChatId, ChatSummary, Message, Service};
 use pandere_plugin_telegram::{LoginPhase, LoginState};
@@ -34,6 +36,23 @@ pub enum LoginInputMode {
     Password,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadStatus {
+    Idle,
+    Loading,
+    Failed(String),
+}
+
+impl ThreadStatus {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Idle => "ready".into(),
+            Self::Loading => "loading".into(),
+            Self::Failed(message) => format!("failed: {message}"),
+        }
+    }
+}
+
 pub struct AppState {
     pub screen: Screen,
     pub source: MessengerSnapshot,
@@ -48,6 +67,8 @@ pub struct AppState {
     pub login_has_saved_session: bool,
     pub login_password_hint: Option<String>,
     pub login_user_label: Option<String>,
+    pub thread_cache: HashMap<ChatId, Vec<Message>>,
+    pub thread_status: ThreadStatus,
 }
 
 impl AppState {
@@ -57,10 +78,18 @@ impl AppState {
     ) -> Result<Self> {
         let source = source.snapshot()?;
         let selected_chat_id = source.chats.first().map(|chat| chat.id.clone());
+        let thread_cache = build_thread_cache(&source.messages);
+        let initial_messages = selected_chat_id
+            .as_ref()
+            .and_then(|chat_id| thread_cache.get(chat_id).cloned())
+            .unwrap_or_else(|| source.messages.clone());
 
         Ok(Self {
             screen: Screen::Main,
-            source,
+            source: crate::data_source::MessengerSnapshot {
+                messages: initial_messages,
+                ..source
+            },
             registry,
             selected_chat_id,
             login_phase: None,
@@ -72,6 +101,8 @@ impl AppState {
             login_has_saved_session: false,
             login_password_hint: None,
             login_user_label: None,
+            thread_cache,
+            thread_status: ThreadStatus::Idle,
         })
     }
 
@@ -165,16 +196,7 @@ impl AppState {
     }
 
     pub fn messages(&self) -> Vec<Message> {
-        match &self.selected_chat_id {
-            Some(chat_id) => self
-                .source
-                .messages
-                .iter()
-                .filter(|message| message.chat_id == *chat_id)
-                .cloned()
-                .collect(),
-            None => self.source.messages.clone(),
-        }
+        self.source.messages.clone()
     }
 
     pub fn selected_chat_index(&self) -> Option<usize> {
@@ -205,6 +227,43 @@ impl AppState {
         let current = self.selected_chat_index().unwrap_or(0);
         let previous = current.saturating_sub(1);
         self.selected_chat_id = Some(self.source.chats[previous].id.clone());
+    }
+
+    pub fn apply_cached_thread(&mut self) -> bool {
+        let Some(chat_id) = self.selected_chat_id.as_ref() else {
+            self.source.messages.clear();
+            return false;
+        };
+
+        let Some(messages) = self.thread_cache.get(chat_id).cloned() else {
+            return false;
+        };
+
+        self.source.messages = messages;
+        self.thread_status = ThreadStatus::Idle;
+        true
+    }
+
+    pub fn cache_thread(&mut self, chat_id: ChatId, messages: Vec<Message>) {
+        self.thread_cache.insert(chat_id.clone(), messages.clone());
+        if self.selected_chat_id.as_ref() == Some(&chat_id) {
+            self.source.messages = messages;
+            self.thread_status = ThreadStatus::Idle;
+        }
+    }
+
+    pub fn set_thread_loading(&mut self) {
+        self.source.messages.clear();
+        self.thread_status = ThreadStatus::Loading;
+    }
+
+    pub fn set_thread_failed(&mut self, message: impl Into<String>) {
+        self.source.messages.clear();
+        self.thread_status = ThreadStatus::Failed(message.into());
+    }
+
+    pub fn thread_status_label(&self) -> String {
+        self.thread_status.label()
     }
 
     pub fn login_lines(&self) -> Vec<String> {
@@ -292,4 +351,12 @@ fn fallback_messenger() -> LoadedMessenger {
         },
         status: crate::plugin::PluginLoadStatus::Disabled,
     }
+}
+
+pub(crate) fn build_thread_cache(messages: &[Message]) -> HashMap<ChatId, Vec<Message>> {
+    let mut cache: HashMap<ChatId, Vec<Message>> = HashMap::new();
+    for message in messages {
+        cache.entry(message.chat_id.clone()).or_default().push(message.clone());
+    }
+    cache
 }
