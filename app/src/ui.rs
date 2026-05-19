@@ -1,13 +1,14 @@
+use pandere_core::Message;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 
 use crate::{app::Screen, logs::LogEntry};
-use crate::state::{AppState, ChatPreview, MessengerView, PluginCard};
+use crate::state::{AppState, ChatPreview, MessengerFocus, MessengerView, PluginCard};
 
 fn base_text_style() -> Style {
     Style::default().fg(Color::Gray)
@@ -99,7 +100,7 @@ pub fn draw_app(frame: &mut Frame, state: &AppState, log_lines: &[LogEntry]) {
         Screen::Logs => draw_logs(frame, chunks[1], log_lines),
     }
 
-    let footer = Paragraph::new("0 Logs  1 Main  2 Login  3 Messenger  Left Back  Right Enter  Up/Down Move  c Compose  Enter Submit  Esc Cancel  q Quit")
+    let footer = Paragraph::new("0 Logs  1 Main  2 Login  3 Messenger  Left Back  Right Enter Chat  Up/Down Select or Scroll  c Compose  Enter Submit  Esc Cancel  q Quit")
         .block(block_for_screen(screen, "Keys"))
         .style(base_text_style());
     frame.render_widget(footer, chunks[2]);
@@ -230,13 +231,22 @@ fn draw_messenger(
         }
     };
     let left_list = List::new(left_items)
-        .block(messenger_pane_block(left_title, true, true))
+        .block(messenger_pane_block(
+            left_title,
+            state.messenger_focus == MessengerFocus::Left,
+            true,
+        ))
         .style(base_text_style());
     frame.render_widget(left_list, columns[0]);
 
     let messages = state.messages();
     let thread_status_label = state.thread_status_label();
     let right_block_title = if state.is_inside_group_threads() {
+        state
+            .selected_leaf_chat()
+            .map(|chat| format!("Chat: {} ({thread_status_label})", chat.title))
+            .unwrap_or_else(|| format!("Chat ({thread_status_label})"))
+    } else if state.can_focus_right_pane() {
         state
             .selected_leaf_chat()
             .map(|chat| format!("Chat: {} ({thread_status_label})", chat.title))
@@ -259,12 +269,7 @@ fn draw_messenger(
         } else {
             messages
                 .iter()
-                .flat_map(|message| {
-                    [
-                        Line::from(format!("{}: {}", message.author_name, message.text)),
-                        Line::from(String::new()),
-                    ]
-                })
+                .flat_map(render_message_lines)
                 .collect::<Vec<_>>()
         }
     } else {
@@ -314,12 +319,38 @@ fn draw_messenger(
     }
 
     let visible_height = columns[1].height.saturating_sub(2) as usize;
-    let scroll = right_lines.len().saturating_sub(visible_height) as u16;
+    let auto_bottom_scroll = right_lines.len().saturating_sub(visible_height) as u16;
+    let scroll = state.effective_thread_scroll(auto_bottom_scroll);
     let right = Paragraph::new(right_lines)
-        .block(messenger_pane_block(right_block_title, true, true))
+        .block(messenger_pane_block(
+            right_block_title,
+            state.messenger_focus == MessengerFocus::Right,
+            true,
+        ))
         .style(base_text_style())
+        .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
     frame.render_widget(right, columns[1]);
+}
+
+fn render_message_lines(message: &Message) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut parts = message.text.lines();
+
+    match parts.next() {
+        Some(first_line) => {
+            lines.push(Line::from(format!("{}: {}", message.author_name, first_line)));
+            for line in parts {
+                lines.push(Line::from(format!("  {}", line)));
+            }
+        }
+        None => {
+            lines.push(Line::from(format!("{}:", message.author_name)));
+        }
+    }
+
+    lines.push(Line::from(String::new()));
+    lines
 }
 
 fn draw_logs(frame: &mut Frame, area: Rect, log_lines: &[LogEntry]) {

@@ -59,6 +59,12 @@ pub enum MessengerView {
     GroupThreads { root_chat_id: ChatId },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessengerFocus {
+    Left,
+    Right,
+}
+
 pub struct AppState {
     pub screen: Screen,
     pub source: MessengerSnapshot,
@@ -66,6 +72,7 @@ pub struct AppState {
     pub selected_root_chat_id: Option<ChatId>,
     pub selected_thread_chat_id: Option<ChatId>,
     pub messenger_view: MessengerView,
+    pub messenger_focus: MessengerFocus,
     pub login_phase: Option<LoginPhase>,
     pub login_input_mode: Option<LoginInputMode>,
     pub login_input: String,
@@ -79,6 +86,8 @@ pub struct AppState {
     pub forum_threads_status: ThreadStatus,
     pub thread_cache: HashMap<ChatId, Vec<Message>>,
     pub thread_status: ThreadStatus,
+    pub thread_scroll: u16,
+    pub follow_thread_bottom: bool,
     pub composer_active: bool,
     pub composer_input: String,
     pub composer_notice: Option<String>,
@@ -99,6 +108,7 @@ impl AppState {
             selected_root_chat_id: None,
             selected_thread_chat_id: None,
             messenger_view: MessengerView::Root,
+            messenger_focus: MessengerFocus::Left,
             login_phase: None,
             login_input_mode: None,
             login_input: String::new(),
@@ -112,6 +122,8 @@ impl AppState {
             forum_threads_status: ThreadStatus::Idle,
             thread_cache,
             thread_status: ThreadStatus::Idle,
+            thread_scroll: 0,
+            follow_thread_bottom: true,
             composer_active: false,
             composer_input: String::new(),
             composer_notice: None,
@@ -298,10 +310,12 @@ impl AppState {
             self.selected_root_chat_id = first_root;
         }
         self.messenger_view = MessengerView::Root;
+        self.messenger_focus = MessengerFocus::Left;
         self.sync_selected_thread_to_root();
         self.source.messages.clear();
         self.forum_threads_status = ThreadStatus::Idle;
         self.thread_status = ThreadStatus::Idle;
+        self.reset_thread_scroll();
     }
 
     pub fn select_next_root_chat(&mut self) {
@@ -360,15 +374,29 @@ impl AppState {
         };
         if self.selected_root_has_threads() {
             self.messenger_view = MessengerView::GroupThreads { root_chat_id };
+            self.messenger_focus = MessengerFocus::Left;
         }
     }
 
     pub fn leave_group_threads(&mut self) {
         self.messenger_view = MessengerView::Root;
+        self.messenger_focus = MessengerFocus::Left;
     }
 
     pub fn is_inside_group_threads(&self) -> bool {
         matches!(self.messenger_view, MessengerView::GroupThreads { .. })
+    }
+
+    pub fn focus_right_pane(&mut self) {
+        self.messenger_focus = MessengerFocus::Right;
+    }
+
+    pub fn focus_left_pane(&mut self) {
+        self.messenger_focus = MessengerFocus::Left;
+    }
+
+    pub fn can_focus_right_pane(&self) -> bool {
+        !self.selected_root_has_threads() || self.is_inside_group_threads()
     }
 
     pub fn apply_cached_thread(&mut self) -> bool {
@@ -383,6 +411,7 @@ impl AppState {
 
         self.source.messages = messages;
         self.thread_status = ThreadStatus::Idle;
+        self.reset_thread_scroll();
         true
     }
 
@@ -391,6 +420,7 @@ impl AppState {
         if self.preview_chat_id().as_ref() == Some(&chat_id) {
             self.source.messages = messages;
             self.thread_status = ThreadStatus::Idle;
+            self.reset_thread_scroll();
         }
     }
 
@@ -425,11 +455,13 @@ impl AppState {
     pub fn set_thread_loading(&mut self) {
         self.source.messages.clear();
         self.thread_status = ThreadStatus::Loading;
+        self.reset_thread_scroll();
     }
 
     pub fn set_thread_failed(&mut self, message: impl Into<String>) {
         self.source.messages.clear();
         self.thread_status = ThreadStatus::Failed(message.into());
+        self.reset_thread_scroll();
     }
 
     pub fn thread_status_label(&self) -> String {
@@ -492,6 +524,26 @@ impl AppState {
 
     pub fn clear_composer_notice(&mut self) {
         self.composer_notice = None;
+    }
+
+    pub fn scroll_thread_up(&mut self, lines: u16) {
+        let current = self.thread_scroll;
+        self.follow_thread_bottom = false;
+        self.thread_scroll = current.saturating_sub(lines);
+    }
+
+    pub fn scroll_thread_down(&mut self, lines: u16) {
+        let current = self.thread_scroll;
+        self.follow_thread_bottom = false;
+        self.thread_scroll = current.saturating_add(lines);
+    }
+
+    pub fn effective_thread_scroll(&self, auto_bottom: u16) -> u16 {
+        if self.follow_thread_bottom {
+            auto_bottom
+        } else {
+            self.thread_scroll.min(auto_bottom)
+        }
     }
 
     pub fn login_lines(&self) -> Vec<String> {
@@ -564,6 +616,11 @@ impl AppState {
         lines.push("esc clear input/notice".into());
 
         lines
+    }
+
+    fn reset_thread_scroll(&mut self) {
+        self.thread_scroll = 0;
+        self.follow_thread_bottom = true;
     }
 }
 

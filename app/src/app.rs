@@ -19,7 +19,7 @@ use crate::{
     data_source::{AuthStatus, SyncStatus},
     fixtures::FixtureMessengerSource,
     logs::LogBuffer,
-    state::{AppState, LoginInputMode},
+    state::{AppState, LoginInputMode, MessengerFocus},
     ui,
 };
 
@@ -169,12 +169,10 @@ impl App {
                     self.handle_messenger_down();
                 }
                 KeyCode::Right if self.state.screen == Screen::Messenger => {
-                    self.state.enter_selected_root();
-                    self.schedule_preview_fetch();
+                    self.handle_messenger_right();
                 }
                 KeyCode::Left if self.state.screen == Screen::Messenger => {
-                    self.state.leave_group_threads();
-                    self.schedule_preview_fetch();
+                    self.handle_messenger_left();
                 }
                 _ => {}
             }
@@ -503,21 +501,57 @@ impl App {
     }
 
     fn handle_messenger_up(&mut self) {
-        if self.state.is_inside_group_threads() {
-            self.state.select_previous_thread_chat();
+        if self.state.messenger_focus == MessengerFocus::Right {
+            self.state.scroll_thread_up(3);
         } else {
-            self.state.select_previous_root_chat();
+            if self.state.is_inside_group_threads() {
+                self.state.select_previous_thread_chat();
+            } else {
+                self.state.select_previous_root_chat();
+            }
+            self.schedule_preview_fetch();
         }
-        self.schedule_preview_fetch();
     }
 
     fn handle_messenger_down(&mut self) {
-        if self.state.is_inside_group_threads() {
-            self.state.select_next_thread_chat();
+        if self.state.messenger_focus == MessengerFocus::Right {
+            self.state.scroll_thread_down(3);
         } else {
-            self.state.select_next_root_chat();
+            if self.state.is_inside_group_threads() {
+                self.state.select_next_thread_chat();
+            } else {
+                self.state.select_next_root_chat();
+            }
+            self.schedule_preview_fetch();
         }
-        self.schedule_preview_fetch();
+    }
+
+    fn handle_messenger_right(&mut self) {
+        if self.state.is_inside_group_threads() {
+            if self.state.can_focus_right_pane() {
+                self.state.focus_right_pane();
+            }
+            return;
+        }
+
+        if self.state.selected_root_has_threads() {
+            self.state.enter_selected_root();
+            self.schedule_preview_fetch();
+        } else if self.state.can_focus_right_pane() {
+            self.state.focus_right_pane();
+        }
+    }
+
+    fn handle_messenger_left(&mut self) {
+        if self.state.messenger_focus == MessengerFocus::Right {
+            self.state.focus_left_pane();
+            return;
+        }
+
+        if self.state.is_inside_group_threads() {
+            self.state.leave_group_threads();
+            self.schedule_preview_fetch();
+        }
     }
 }
 
