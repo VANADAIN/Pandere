@@ -389,6 +389,7 @@ impl AppState {
 
     pub fn focus_right_pane(&mut self) {
         self.messenger_focus = MessengerFocus::Right;
+        self.follow_thread_bottom = true;
     }
 
     pub fn focus_left_pane(&mut self) {
@@ -527,22 +528,25 @@ impl AppState {
     }
 
     pub fn scroll_thread_up(&mut self, lines: u16) {
-        let current = self.thread_scroll;
         self.follow_thread_bottom = false;
-        self.thread_scroll = current.saturating_sub(lines);
+        self.thread_scroll = self.thread_scroll.saturating_add(lines);
     }
 
     pub fn scroll_thread_down(&mut self, lines: u16) {
-        let current = self.thread_scroll;
-        self.follow_thread_bottom = false;
-        self.thread_scroll = current.saturating_add(lines);
+        if self.thread_scroll <= lines {
+            self.thread_scroll = 0;
+            self.follow_thread_bottom = true;
+        } else {
+            self.thread_scroll -= lines;
+            self.follow_thread_bottom = false;
+        }
     }
 
     pub fn effective_thread_scroll(&self, auto_bottom: u16) -> u16 {
         if self.follow_thread_bottom {
             auto_bottom
         } else {
-            self.thread_scroll.min(auto_bottom)
+            auto_bottom.saturating_sub(self.thread_scroll.min(auto_bottom))
         }
     }
 

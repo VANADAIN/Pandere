@@ -490,21 +490,7 @@ impl TelegramFetchClient {
             .await?
             .ok_or_else(|| anyhow!("telegram chat `{}` not found in current dialogs", chat_id.as_str()))?;
         match target {
-            TelegramChatTarget::Dialog { .. } => {
-                let mut messages = self.client.iter_messages(peer).limit(limit);
-                let mut mapped = Vec::with_capacity(limit.min(128));
-
-                while let Some(message) = messages
-                    .next()
-                    .await
-                    .context("failed to fetch telegram message history")?
-                {
-                    mapped.push(map_message(chat_id.clone(), message));
-                }
-
-                mapped.reverse();
-                Ok(mapped)
-            }
+            TelegramChatTarget::Dialog { .. } => self.fetch_dialog_messages(chat_id, peer, limit).await,
             TelegramChatTarget::ForumTopic { top_message, .. } => {
                 info!("fetching telegram forum topic history for {}", chat_id.as_str());
                 self.fetch_forum_topic_messages(chat_id, peer, top_message, limit)
@@ -577,18 +563,60 @@ impl TelegramFetchClient {
             .await
             .context("failed to fetch telegram forum topic replies")?;
 
+        self.map_history_response(chat_id, response)
+    }
+
+    async fn fetch_dialog_messages(
+        &self,
+        chat_id: &ChatId,
+        peer: PeerRef,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let response = self
+            .client
+            .invoke(&tl::functions::messages::GetHistory {
+                peer: peer.into(),
+                offset_id: 0,
+                offset_date: 0,
+                add_offset: 0,
+                limit: limit.min(i32::MAX as usize) as i32,
+                max_id: 0,
+                min_id: 0,
+                hash: 0,
+            })
+            .await
+            .context("failed to fetch telegram message history")?;
+
+        self.map_history_response(chat_id, response)
+    }
+
+    fn map_history_response(
+        &self,
+        chat_id: &ChatId,
+        response: tl::enums::messages::Messages,
+    ) -> Result<Vec<Message>> {
         let (messages, users, chats) = unpack_messages_response(response)?;
         let author_names = build_author_names(users, chats);
-        let mut mapped = messages
+        let mut messages = messages
+            .into_iter()
+            .filter(|message| !matches!(message, tl::enums::Message::Empty(_)))
+            .collect::<Vec<_>>();
+        messages.sort_by_key(raw_message_id);
+
+        let oldest_message_id = messages.first().map(raw_message_id).unwrap_or_default();
+        let newest_message_id = messages.last().map(raw_message_id).unwrap_or_default();
+        info!(
+            chat_id = %chat_id.as_str(),
+            oldest_message_id,
+            newest_message_id,
+            message_count = messages.len(),
+            "mapped telegram history slice"
+        );
+
+        let mapped = messages
             .into_iter()
             .map(|message| map_raw_message(chat_id.clone(), message, &author_names))
             .collect::<Vec<_>>();
-        mapped.sort_by_key(|message| {
-            message
-                .sent_at
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-        });
         Ok(mapped)
     }
 
@@ -657,6 +685,7 @@ fn map_message(chat_id: ChatId, message: grammers_client::message::Message) -> M
     let author_name = message
         .sender()
         .and_then(peer_label)
+        .or_else(|| message.peer().and_then(peer_label))
         .unwrap_or_else(|| {
             if message.outgoing() {
                 "You".to_owned()
@@ -793,8 +822,16 @@ fn unpack_messages_response(
 
 fn raw_message_sender_key(raw: &tl::enums::Message) -> Option<String> {
     match raw {
-        tl::enums::Message::Message(message) => message.from_id.as_ref().map(peer_key),
-        tl::enums::Message::Service(message) => message.from_id.as_ref().map(peer_key),
+        tl::enums::Message::Message(message) => message
+            .from_id
+            .as_ref()
+            .map(peer_key)
+            .or_else(|| Some(peer_key(&message.peer_id))),
+        tl::enums::Message::Service(message) => message
+            .from_id
+            .as_ref()
+            .map(peer_key)
+            .or_else(|| Some(peer_key(&message.peer_id))),
         tl::enums::Message::Empty(_) => None,
     }
 }
@@ -803,6 +840,14 @@ fn raw_message_text(raw: &tl::enums::Message) -> Option<&str> {
     match raw {
         tl::enums::Message::Message(message) => Some(message.message.as_str()),
         tl::enums::Message::Service(_) | tl::enums::Message::Empty(_) => None,
+    }
+}
+
+fn raw_message_id(raw: &tl::enums::Message) -> i32 {
+    match raw {
+        tl::enums::Message::Message(message) => message.id,
+        tl::enums::Message::Service(message) => message.id,
+        tl::enums::Message::Empty(message) => message.id,
     }
 }
 

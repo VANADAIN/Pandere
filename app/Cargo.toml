@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow = "1.0"
+chrono = { version = "0.4", default-features = true, features = ["clock"] }
 crossterm = "0.29"
 pandere-core = { path = "../core" }
 pandere-plugin-host = { path = "../plugin-host" }
@@ -14,3 +15,4 @@ ratatui = "0.29"
 tokio = { version = "1.47", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+unicode-width = "0.2"

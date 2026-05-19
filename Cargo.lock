@@ -1743,6 +1743,7 @@ name = "pandere-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "crossterm 0.29.0",
  "pandere-core",
  "pandere-plugin-host",
@@ -1751,6 +1752,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

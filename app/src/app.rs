@@ -322,14 +322,14 @@ impl App {
             return;
         };
 
-        if self.state.apply_cached_thread() {
-            info!(chat_id = %chat_id.as_str(), "using cached thread");
-            self.pending_thread_fetch = None;
-            return;
+        let used_cached_thread = self.state.apply_cached_thread();
+        if used_cached_thread {
+            info!(chat_id = %chat_id.as_str(), "using cached thread before refresh");
+        } else {
+            info!(chat_id = %chat_id.as_str(), "scheduled thread fetch");
+            self.state.set_thread_loading();
         }
 
-        info!(chat_id = %chat_id.as_str(), "scheduled thread fetch");
-        self.state.set_thread_loading();
         self.pending_thread_fetch = Some(PendingThreadFetch {
             chat_id,
             requested_at: Instant::now() + Duration::from_millis(150),
@@ -530,6 +530,10 @@ impl App {
         if self.state.is_inside_group_threads() {
             if self.state.can_focus_right_pane() {
                 self.state.focus_right_pane();
+                if let Some(chat_id) = self.state.active_chat_id() {
+                    self.in_flight_threads.remove(&chat_id);
+                    self.schedule_force_thread_refresh(chat_id);
+                }
             }
             return;
         }
@@ -539,6 +543,10 @@ impl App {
             self.schedule_preview_fetch();
         } else if self.state.can_focus_right_pane() {
             self.state.focus_right_pane();
+            if let Some(chat_id) = self.state.active_chat_id() {
+                self.in_flight_threads.remove(&chat_id);
+                self.schedule_force_thread_refresh(chat_id);
+            }
         }
     }
 

@@ -1,11 +1,13 @@
+use chrono::{DateTime, Local};
 use pandere_core::Message;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
 };
+use unicode_width::UnicodeWidthChar;
 
 use crate::{app::Screen, logs::LogEntry};
 use crate::state::{AppState, ChatPreview, MessengerFocus, MessengerView, PluginCard};
@@ -23,6 +25,10 @@ fn telegram_border_style() -> Style {
 }
 
 fn default_border_style() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+fn muted_text_style() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
@@ -184,17 +190,14 @@ fn draw_messenger(
                 .iter()
                 .enumerate()
                 .map(|(index, chat)| {
-                    let has_threads = state.chats().iter().any(|candidate| {
-                        candidate.id.as_str().starts_with(chat.id.as_str())
-                            && candidate.id.as_str().contains(":topic:")
-                    });
-                    let thread_marker = if has_threads { ">" } else { " " };
+                    let thread_marker = if chat.has_subchats { ">" } else { " " };
                     let unread_marker = if chat.unread_count > 0 { "*" } else { " " };
                     let selected_marker =
                         if Some(index) == state.selected_root_chat_index() { ">" } else { " " };
+                    let kind_marker = root_chat_kind_marker(chat);
                     ListItem::new(format!(
-                        "{selected_marker}{thread_marker}{unread_marker} {}",
-                        chat.title
+                        "{selected_marker}{thread_marker}{unread_marker} [{kind_marker}] {}",
+                        chat.title,
                     ))
                 })
                 .collect();
@@ -255,6 +258,7 @@ fn draw_messenger(
         state.thread_column_title()
     };
 
+    let content_width = columns[1].width.saturating_sub(2) as usize;
     let mut right_lines = if state.is_inside_group_threads() || !state.selected_root_has_threads() {
         if messages.is_empty() {
             let leaf_title = state
@@ -269,7 +273,7 @@ fn draw_messenger(
         } else {
             messages
                 .iter()
-                .flat_map(render_message_lines)
+                .flat_map(|message| render_message_lines(message, content_width))
                 .collect::<Vec<_>>()
         }
     } else {
@@ -328,29 +332,108 @@ fn draw_messenger(
             true,
         ))
         .style(base_text_style())
-        .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
     frame.render_widget(right, columns[1]);
 }
 
-fn render_message_lines(message: &Message) -> Vec<Line<'static>> {
+fn render_message_lines(message: &Message, content_width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let mut parts = message.text.lines();
+    let timestamp = format_message_timestamp(message);
+    lines.push(Line::from(vec![
+        Span::styled(
+            message.author_name.clone(),
+            base_text_style().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("  {timestamp}"), muted_text_style()),
+    ]));
 
-    match parts.next() {
-        Some(first_line) => {
-            lines.push(Line::from(format!("{}: {}", message.author_name, first_line)));
-            for line in parts {
-                lines.push(Line::from(format!("  {}", line)));
+    if message.text.is_empty() {
+        lines.push(Line::from("  "));
+    } else {
+        let body_width = content_width.saturating_sub(2).max(1);
+        for line in message.text.lines() {
+            let wrapped = wrap_plain_text(line, body_width);
+            if wrapped.is_empty() {
+                lines.push(Line::from("  "));
+            } else {
+                for wrapped_line in wrapped {
+                    lines.push(Line::from(format!("  {wrapped_line}")));
+                }
             }
         }
-        None => {
-            lines.push(Line::from(format!("{}:", message.author_name)));
-        }
+    }
+    lines.push(Line::from(Span::styled(
+        "  ┈┈┈",
+        muted_text_style(),
+    )));
+    lines.push(Line::from(""));
+    lines
+}
+
+fn format_message_timestamp(message: &Message) -> String {
+    let local_time: DateTime<Local> = message.sent_at.into();
+    let now = Local::now().date_naive();
+    if local_time.date_naive() == now {
+        local_time.format("%H:%M").to_string()
+    } else {
+        local_time.format("%Y-%m-%d %H:%M").to_string()
+    }
+}
+
+fn wrap_plain_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
     }
 
-    lines.push(Line::from(String::new()));
-    lines
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+        if current_width > 0 && current_width + ch_width > width {
+            lines.push(current);
+            current = String::new();
+            current_width = 0;
+        }
+        current.push(ch);
+        current_width += ch_width;
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
+}
+
+fn root_chat_kind_marker(chat: &pandere_core::ChatSummary) -> &'static str {
+    if chat.has_subchats {
+        return "FOR";
+    }
+
+    let Some(raw) = chat.id.as_str().strip_prefix("telegram:") else {
+        return "CHT";
+    };
+    let Some(dialog_id) = raw.split(':').next().and_then(|id| id.parse::<i64>().ok()) else {
+        return "CHT";
+    };
+
+    if dialog_id > 0 {
+        "USR"
+    } else if dialog_id <= -1_000_000_000_001 {
+        "CHN"
+    } else {
+        "GRP"
+    }
 }
 
 fn draw_logs(frame: &mut Frame, area: Rect, log_lines: &[LogEntry]) {
