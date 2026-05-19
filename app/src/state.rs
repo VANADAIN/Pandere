@@ -69,6 +69,9 @@ pub struct AppState {
     pub login_user_label: Option<String>,
     pub thread_cache: HashMap<ChatId, Vec<Message>>,
     pub thread_status: ThreadStatus,
+    pub composer_active: bool,
+    pub composer_input: String,
+    pub composer_notice: Option<String>,
 }
 
 impl AppState {
@@ -103,6 +106,9 @@ impl AppState {
             login_user_label: None,
             thread_cache,
             thread_status: ThreadStatus::Idle,
+            composer_active: false,
+            composer_input: String::new(),
+            composer_notice: None,
         })
     }
 
@@ -264,6 +270,35 @@ impl AppState {
 
     pub fn thread_status_label(&self) -> String {
         self.thread_status.label()
+    }
+
+    pub fn activate_composer(&mut self) {
+        self.composer_active = true;
+        self.composer_notice = None;
+    }
+
+    pub fn deactivate_composer(&mut self) {
+        self.composer_active = false;
+    }
+
+    pub fn clear_composer(&mut self) {
+        self.composer_input.clear();
+    }
+
+    pub fn push_composer_input(&mut self, ch: char) {
+        self.composer_input.push(ch);
+    }
+
+    pub fn pop_composer_input(&mut self) {
+        self.composer_input.pop();
+    }
+
+    pub fn set_composer_notice(&mut self, notice: impl Into<String>) {
+        self.composer_notice = Some(notice.into());
+    }
+
+    pub fn clear_composer_notice(&mut self) {
+        self.composer_notice = None;
     }
 
     pub fn login_lines(&self) -> Vec<String> {

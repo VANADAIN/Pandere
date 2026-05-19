@@ -112,11 +112,38 @@ impl App {
                 }
             }
 
+            if self.state.screen == Screen::Messenger && self.state.composer_active {
+                match key.code {
+                    KeyCode::Enter => {
+                        self.send_composer_text().await?;
+                        continue;
+                    }
+                    KeyCode::Backspace => {
+                        self.state.pop_composer_input();
+                        continue;
+                    }
+                    KeyCode::Esc => {
+                        self.state.deactivate_composer();
+                        self.state.clear_composer();
+                        self.state.clear_composer_notice();
+                        continue;
+                    }
+                    KeyCode::Char(ch) if !ch.is_control() => {
+                        self.state.push_composer_input(ch);
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
             match key.code {
                 KeyCode::Char('q') => break,
                 KeyCode::Char('1') => self.state.screen = Screen::Main,
                 KeyCode::Char('2') => self.state.screen = Screen::Login,
                 KeyCode::Char('3') => self.state.screen = Screen::Messenger,
+                KeyCode::Char('c') if self.state.screen == Screen::Messenger => {
+                    self.state.activate_composer();
+                }
                 KeyCode::Up if self.state.screen == Screen::Messenger => {
                     self.state.select_previous_chat();
                     self.schedule_selected_thread_fetch();
@@ -143,6 +170,9 @@ impl App {
             &self.state.login_lines(),
             self.state.selected_chat_index(),
             &self.state.thread_status_label(),
+            self.state.composer_active,
+            &self.state.composer_input,
+            self.state.composer_notice.as_deref(),
         );
     }
 
@@ -316,6 +346,47 @@ impl App {
                 }
             }
         }
+    }
+
+    async fn send_composer_text(&mut self) -> Result<()> {
+        let Some(telegram) = self.telegram.as_ref() else {
+            self.state.set_composer_notice("telegram client is unavailable");
+            return Ok(());
+        };
+
+        let Some(chat_id) = self.state.selected_chat_id.clone() else {
+            self.state.set_composer_notice("no chat selected");
+            return Ok(());
+        };
+
+        let text = self.state.composer_input.trim().to_owned();
+        if text.is_empty() {
+            self.state.set_composer_notice("message is empty");
+            return Ok(());
+        }
+
+        match telegram.send_text(&chat_id, &text).await {
+            Ok(_) => {
+                self.state.clear_composer();
+                self.state.clear_composer_notice();
+                self.state.deactivate_composer();
+                self.in_flight_threads.remove(&chat_id);
+                self.schedule_force_thread_refresh(chat_id);
+            }
+            Err(error) => {
+                self.state.set_composer_notice(error.to_string());
+            }
+        }
+
+        Ok(())
+    }
+
+    fn schedule_force_thread_refresh(&mut self, chat_id: ChatId) {
+        self.state.set_thread_loading();
+        self.pending_thread_fetch = Some(PendingThreadFetch {
+            chat_id,
+            requested_at: Instant::now(),
+        });
     }
 }
 

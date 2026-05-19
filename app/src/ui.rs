@@ -2,13 +2,21 @@ use pandere_core::{ChatSummary, Message};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::Line,
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 
 use crate::app::Screen;
 use crate::state::{ChatPreview, PluginCard};
+
+fn base_text_style() -> Style {
+    Style::default().fg(Color::Gray)
+}
+
+fn emph_text_style() -> Style {
+    base_text_style().add_modifier(Modifier::BOLD)
+}
 
 pub fn draw_app(
     frame: &mut Frame,
@@ -20,6 +28,9 @@ pub fn draw_app(
     login_lines: &[String],
     selected_chat_index: Option<usize>,
     thread_status_label: &str,
+    composer_active: bool,
+    composer_input: &str,
+    composer_notice: Option<&str>,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -32,7 +43,7 @@ pub fn draw_app(
 
     let title = Paragraph::new(Line::from("Pandere Host Bridge"))
         .block(Block::default().borders(Borders::ALL).title("App"))
-        .style(Style::default().add_modifier(Modifier::BOLD));
+        .style(emph_text_style());
     frame.render_widget(title, chunks[0]);
 
     match screen {
@@ -46,12 +57,16 @@ pub fn draw_app(
                 messages,
                 selected_chat_index,
                 thread_status_label,
+                composer_active,
+                composer_input,
+                composer_notice,
             )
         }
     }
 
-    let footer = Paragraph::new("1 Main  2 Login  3 Messenger  Enter Next/Submit  r Refresh Code  x Logout  Up/Down Chat  q Quit")
-        .block(Block::default().borders(Borders::ALL).title("Keys"));
+    let footer = Paragraph::new("1 Main  2 Login  3 Messenger  c Compose  Enter Submit  Esc Cancel  Up/Down Chat  q Quit")
+        .block(Block::default().borders(Borders::ALL).title("Keys"))
+        .style(base_text_style());
     frame.render_widget(footer, chunks[2]);
 }
 
@@ -83,7 +98,8 @@ fn draw_main(
         ])
     });
     let plugin_list = List::new(plugin_items.collect::<Vec<_>>())
-        .block(Block::default().borders(Borders::ALL).title("Plugin Registry"));
+        .block(Block::default().borders(Borders::ALL).title("Plugin Registry"))
+        .style(base_text_style());
     frame.render_widget(plugin_list, columns[0]);
 
     let chat_items = chat_previews.iter().map(|chat| {
@@ -97,7 +113,8 @@ fn draw_main(
         ))
     });
     let chat_list = List::new(chat_items.collect::<Vec<_>>())
-        .block(Block::default().borders(Borders::ALL).title("Chat Preview"));
+        .block(Block::default().borders(Borders::ALL).title("Chat Preview"))
+        .style(base_text_style());
     frame.render_widget(chat_list, columns[1]);
 }
 
@@ -108,7 +125,9 @@ fn draw_login(frame: &mut Frame, area: Rect, login_lines: &[String]) {
         .map(Line::from)
         .collect::<Vec<_>>();
 
-    let paragraph = Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Login"));
+    let paragraph = Paragraph::new(text)
+        .block(Block::default().borders(Borders::ALL).title("Login"))
+        .style(base_text_style());
     frame.render_widget(paragraph, area);
 }
 
@@ -119,6 +138,9 @@ fn draw_messenger(
     messages: &[Message],
     selected_chat_index: Option<usize>,
     thread_status_label: &str,
+    composer_active: bool,
+    composer_input: &str,
+    composer_notice: Option<&str>,
 ) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -131,10 +153,12 @@ fn draw_messenger(
         ListItem::new(format!("{selected_marker}{unread_marker} {}", chat.title))
     });
     let chat_list =
-        List::new(chats.collect::<Vec<_>>()).block(Block::default().borders(Borders::ALL).title("Dialogs"));
+        List::new(chats.collect::<Vec<_>>())
+            .block(Block::default().borders(Borders::ALL).title("Dialogs"))
+            .style(base_text_style());
     frame.render_widget(chat_list, columns[0]);
 
-    let message_lines = if messages.is_empty() {
+    let mut message_lines = if messages.is_empty() {
         vec![Line::from(format!("Thread status: {thread_status_label}"))]
     } else {
         messages
@@ -147,6 +171,15 @@ fn draw_messenger(
             })
             .collect::<Vec<_>>()
     };
+    message_lines.push(Line::from(String::new()));
+    message_lines.push(Line::from(if composer_active {
+        format!("Compose: {composer_input}")
+    } else {
+        "Compose: press c".to_owned()
+    }));
+    if let Some(notice) = composer_notice {
+        message_lines.push(Line::from(format!("Notice: {notice}")));
+    }
     let visible_height = columns[1].height.saturating_sub(2) as usize;
     let scroll = message_lines.len().saturating_sub(visible_height) as u16;
     let thread = Paragraph::new(message_lines).block(
@@ -154,6 +187,7 @@ fn draw_messenger(
             .borders(Borders::ALL)
             .title(format!("Thread ({thread_status_label})")),
     )
+    .style(base_text_style())
     .scroll((scroll, 0));
     frame.render_widget(thread, columns[1]);
 }

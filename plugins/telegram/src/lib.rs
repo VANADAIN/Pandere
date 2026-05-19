@@ -418,6 +418,10 @@ impl TelegramClient {
     pub async fn fetch_messages(&self, chat_id: &ChatId, limit: usize) -> Result<Vec<Message>> {
         self.fetch_client().fetch_messages(chat_id, limit).await
     }
+
+    pub async fn send_text(&self, chat_id: &ChatId, text: &str) -> Result<Message> {
+        self.fetch_client().send_text(chat_id, text).await
+    }
 }
 
 impl TelegramFetchClient {
@@ -458,6 +462,25 @@ impl TelegramFetchClient {
         }
 
         Ok(None)
+    }
+
+    pub async fn send_text(&self, chat_id: &ChatId, text: &str) -> Result<Message> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(anyhow!("message text must not be empty"));
+        }
+
+        let peer = self
+            .find_peer_ref(chat_id)
+            .await?
+            .ok_or_else(|| anyhow!("telegram chat `{}` not found in current dialogs", chat_id.as_str()))?;
+        let sent = self
+            .client
+            .send_message(peer, text)
+            .await
+            .context("failed to send telegram text message")?;
+
+        Ok(map_message(chat_id.clone(), sent))
     }
 }
 
