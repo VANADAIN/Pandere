@@ -9,6 +9,7 @@ anyhow = "1.0"
 crossterm = "0.29"
 pandere-core = { path = "../core" }
 pandere-plugin-host = { path = "../plugin-host" }
+pandere-plugin-telegram = { path = "../plugins/telegram" }
 ratatui = "0.29"
 tokio = { version = "1.47", features = ["full"] }
 tracing = "0.1"

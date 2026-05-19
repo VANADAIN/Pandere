@@ -1719,6 +1719,7 @@ dependencies = [
  "crossterm 0.29.0",
  "pandere-core",
  "pandere-plugin-host",
+ "pandere-plugin-telegram",
  "ratatui",
  "tokio",
  "tracing",
@@ -1752,6 +1753,8 @@ dependencies = [
  "grammers-mtsender",
  "grammers-session",
  "pandere-core",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
