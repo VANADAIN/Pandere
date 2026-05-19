@@ -2,10 +2,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode};
-use pandere_core::{ChatSummary, Message};
 use ratatui::{Frame, Terminal, prelude::CrosstermBackend};
 
-use crate::ui;
+use crate::{state::AppState, ui};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -15,18 +14,12 @@ pub enum Screen {
 }
 
 pub struct App {
-    screen: Screen,
-    chats: Vec<ChatSummary>,
-    messages: Vec<Message>,
+    state: AppState,
 }
 
 impl App {
-    pub fn new(chats: Vec<ChatSummary>, messages: Vec<Message>) -> Self {
-        Self {
-            screen: Screen::Main,
-            chats,
-            messages,
-        }
+    pub fn new(state: AppState) -> Self {
+        Self { state }
     }
 
     pub fn run(
@@ -46,9 +39,9 @@ impl App {
 
             match key.code {
                 KeyCode::Char('q') => break,
-                KeyCode::Char('1') => self.screen = Screen::Main,
-                KeyCode::Char('2') => self.screen = Screen::Login,
-                KeyCode::Char('3') => self.screen = Screen::Messenger,
+                KeyCode::Char('1') => self.state.screen = Screen::Main,
+                KeyCode::Char('2') => self.state.screen = Screen::Login,
+                KeyCode::Char('3') => self.state.screen = Screen::Messenger,
                 _ => {}
             }
         }
@@ -57,6 +50,13 @@ impl App {
     }
 
     fn draw(&self, frame: &mut Frame) {
-        ui::draw_app(frame, self.screen, &self.chats, &self.messages);
+        ui::draw_app(
+            frame,
+            self.state.screen,
+            &self.state.messenger_overviews(),
+            self.state.chats(),
+            &self.state.messages(),
+            &self.state.login_lines(),
+        );
     }
 }

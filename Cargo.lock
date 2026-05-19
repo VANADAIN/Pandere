@@ -1718,6 +1718,7 @@ dependencies = [
  "anyhow",
  "crossterm 0.29.0",
  "pandere-core",
+ "pandere-plugin-host",
  "ratatui",
  "tokio",
  "tracing",

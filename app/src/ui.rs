@@ -8,8 +8,16 @@ use ratatui::{
 };
 
 use crate::app::Screen;
+use crate::state::MessengerOverview;
 
-pub fn draw_app(frame: &mut Frame, screen: Screen, chats: &[ChatSummary], messages: &[Message]) {
+pub fn draw_app(
+    frame: &mut Frame,
+    screen: Screen,
+    messenger_overviews: &[MessengerOverview],
+    chats: &[ChatSummary],
+    messages: &[Message],
+    login_lines: &[String],
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -19,14 +27,14 @@ pub fn draw_app(frame: &mut Frame, screen: Screen, chats: &[ChatSummary], messag
         ])
         .split(frame.area());
 
-    let title = Paragraph::new(Line::from("Pandere Fixture Shell"))
+    let title = Paragraph::new(Line::from("Pandere Host Bridge"))
         .block(Block::default().borders(Borders::ALL).title("App"))
         .style(Style::default().add_modifier(Modifier::BOLD));
     frame.render_widget(title, chunks[0]);
 
     match screen {
-        Screen::Main => draw_main(frame, chunks[1], chats),
-        Screen::Login => draw_login(frame, chunks[1]),
+        Screen::Main => draw_main(frame, chunks[1], messenger_overviews),
+        Screen::Login => draw_login(frame, chunks[1], login_lines),
         Screen::Messenger => draw_messenger(frame, chunks[1], chats, messages),
     }
 
@@ -35,12 +43,21 @@ pub fn draw_app(frame: &mut Frame, screen: Screen, chats: &[ChatSummary], messag
     frame.render_widget(footer, chunks[2]);
 }
 
-fn draw_main(frame: &mut Frame, area: Rect, chats: &[ChatSummary]) {
-    let items = chats.iter().map(|chat| {
-        let preview = chat.last_message_preview.as_deref().unwrap_or("No messages yet");
+fn draw_main(frame: &mut Frame, area: Rect, overviews: &[MessengerOverview]) {
+    let items = overviews.iter().map(|messenger| {
+        let preview = messenger
+            .last_message_preview
+            .as_deref()
+            .unwrap_or("No messages yet");
         ListItem::new(format!(
-            "{}  [{} unread]  {}",
-            chat.title, chat.unread_count, preview
+            "{} ({:?})  [{} unread]  auth={}  sync={}  plugin={}  {}",
+            messenger.display_name,
+            messenger.service,
+            messenger.unread_count,
+            messenger.auth_label,
+            messenger.sync_label,
+            messenger.plugin_status_label,
+            preview
         ))
     });
 
@@ -49,15 +66,12 @@ fn draw_main(frame: &mut Frame, area: Rect, chats: &[ChatSummary]) {
     frame.render_widget(list, area);
 }
 
-fn draw_login(frame: &mut Frame, area: Rect) {
-    let text = vec![
-        Line::from("Telegram login placeholder"),
-        Line::from(""),
-        Line::from("Planned flow:"),
-        Line::from("1. Enter phone number"),
-        Line::from("2. Confirm code"),
-        Line::from("3. Persist session via secure handle"),
-    ];
+fn draw_login(frame: &mut Frame, area: Rect, login_lines: &[String]) {
+    let text = login_lines
+        .iter()
+        .cloned()
+        .map(Line::from)
+        .collect::<Vec<_>>();
 
     let paragraph = Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Login"));
     frame.render_widget(paragraph, area);

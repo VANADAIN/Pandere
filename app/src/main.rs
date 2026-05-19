@@ -1,5 +1,8 @@
 mod app;
+mod data_source;
 mod fixtures;
+mod plugin;
+mod state;
 mod terminal;
 mod ui;
 
@@ -7,7 +10,13 @@ use anyhow::Result;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
 
-use crate::{app::App, fixtures::{fixture_chats, fixture_messages}, terminal::TerminalGuard};
+use crate::{
+    app::App,
+    fixtures::HostBackedFixtureSource,
+    plugin::bootstrap_dummy_registry,
+    state::AppState,
+    terminal::TerminalGuard,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -16,11 +25,17 @@ async fn main() -> Result<()> {
         .compact()
         .init();
 
-    info!("starting pandere fixture shell");
+    info!("starting pandere host-backed shell");
 
-    let chats = fixture_chats();
-    let messages = fixture_messages(&chats);
-    let mut app = App::new(chats, messages);
+    let registry = bootstrap_dummy_registry();
+    let source = HostBackedFixtureSource::new(
+        registry
+            .primary()
+            .cloned()
+            .expect("dummy registry should contain a messenger"),
+    );
+    let state = AppState::new(source, registry)?;
+    let mut app = App::new(state);
     let mut terminal = TerminalGuard::setup()?;
     app.run(terminal.terminal())
 }
