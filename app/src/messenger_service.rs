@@ -1,8 +1,8 @@
 use anyhow::Result;
 use pandere_core::ChatSummary;
 use pandere_plugin_telegram::{
-    AuthStatus as TelegramAuthStatus, LoginState, TelegramClient, TelegramConfig, TelegramFetchClient,
-    clear_session_file,
+    AuthStatus as TelegramAuthStatus, LoginState, TelegramClient, TelegramConfig,
+    TelegramFetchClient, clear_session_file,
 };
 
 pub struct TelegramService {

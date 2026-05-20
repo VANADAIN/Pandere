@@ -10,7 +10,7 @@ use crate::{
     bindings::{
         MessengerPlugin,
         exports::pandere::messenger::plugin::{
-            AuthStatus, PluginMetadata, PluginError, RetentionHints,
+            AuthStatus, PluginError, PluginMetadata, RetentionHints,
         },
     },
     runtime_host::RuntimeHost,
@@ -45,8 +45,8 @@ impl PluginHost {
 
     pub fn load_component_from_file(&self, path: impl AsRef<Path>) -> Result<Component> {
         let path = path.as_ref();
-        let bytes =
-            std::fs::read(path).with_context(|| format!("failed to read component `{}`", path.display()))?;
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("failed to read component `{}`", path.display()))?;
         self.load_component_from_bytes(&bytes)
     }
 
@@ -58,7 +58,11 @@ impl PluginHost {
         Ok(LoadedPlugin { store, world })
     }
 
-    pub fn probe_component(&self, component: &Component, host: RuntimeHost) -> Result<ComponentProbe> {
+    pub fn probe_component(
+        &self,
+        component: &Component,
+        host: RuntimeHost,
+    ) -> Result<ComponentProbe> {
         let _plugin = self.instantiate(component, host)?;
         Ok(ComponentProbe { instantiated: true })
     }

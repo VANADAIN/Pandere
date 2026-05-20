@@ -300,7 +300,11 @@ impl AppState {
     }
 
     pub fn login_lines(&self) -> Vec<String> {
-        let plugin = self.registry.primary().cloned().unwrap_or_else(fallback_messenger);
+        let plugin = self
+            .registry
+            .primary()
+            .cloned()
+            .unwrap_or_else(fallback_messenger);
         let component_path = plugin
             .manifest
             .component_path

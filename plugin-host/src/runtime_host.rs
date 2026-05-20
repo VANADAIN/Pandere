@@ -118,9 +118,12 @@ impl GuestHostTrait for RuntimeHost {
         label: String,
         value: String,
     ) -> Result<std::result::Result<HostSecretRef, HostPluginError>> {
-        Ok(self.state.store_secret(label, value).map(|secret| HostSecretRef {
-            handle: secret.handle,
-        }))
+        Ok(self
+            .state
+            .store_secret(label, value)
+            .map(|secret| HostSecretRef {
+                handle: secret.handle,
+            }))
     }
 
     fn send_http(

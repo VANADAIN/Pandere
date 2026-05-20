@@ -108,10 +108,7 @@ impl MessengerDataSource for HostBackedFixtureSource {
         let messages = fixture_messages(&chats);
 
         let (auth_status, sync_status) = match &self.messenger.status {
-            PluginLoadStatus::Loaded => (
-                AuthStatus::NeedsLogin,
-                SyncStatus::Pending,
-            ),
+            PluginLoadStatus::Loaded => (AuthStatus::NeedsLogin, SyncStatus::Pending),
             PluginLoadStatus::Failed(message) => (
                 AuthStatus::Unavailable(message.clone()),
                 SyncStatus::Failed(message.clone()),

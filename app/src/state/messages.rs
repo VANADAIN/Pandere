@@ -140,7 +140,12 @@ impl AppState {
             return;
         };
 
-        if let Some(chat) = self.source.chats.iter_mut().find(|chat| &chat.id == chat_id) {
+        if let Some(chat) = self
+            .source
+            .chats
+            .iter_mut()
+            .find(|chat| &chat.id == chat_id)
+        {
             chat.last_message_preview = Some(text.clone());
             chat.last_activity_at = sent_at;
         }
@@ -157,7 +162,10 @@ impl AppState {
 pub(crate) fn build_thread_cache(messages: &[Message]) -> HashMap<ChatId, Vec<Message>> {
     let mut cache: HashMap<ChatId, Vec<Message>> = HashMap::new();
     for message in messages {
-        cache.entry(message.chat_id.clone()).or_default().push(message.clone());
+        cache
+            .entry(message.chat_id.clone())
+            .or_default()
+            .push(message.clone());
     }
     for messages in cache.values_mut() {
         sort_messages(messages);

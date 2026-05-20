@@ -1,10 +1,7 @@
 mod runtime;
 mod types;
 
-use std::{
-    collections::HashSet,
-    time::Instant,
-};
+use std::{collections::HashSet, time::Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, Event};
@@ -14,6 +11,10 @@ use ratatui::{Frame, Terminal, prelude::CrosstermBackend};
 use tokio::sync::mpsc;
 use tracing::info;
 
+use self::types::{
+    DialogsSyncResult, ForumThreadsFetchResult, LeftPaneDirection, PendingForumThreadsFetch,
+    PendingThreadFetch, SendMessageResult, ThreadFetchResult,
+};
 use crate::{
     cache::CacheStore,
     constants::{
@@ -29,10 +30,6 @@ use crate::{
     messenger_service::TelegramService,
     state::{AppState, LoginInputMode},
     ui,
-};
-use self::types::{
-    DialogsSyncResult, ForumThreadsFetchResult, LeftPaneDirection, PendingForumThreadsFetch,
-    PendingThreadFetch, SendMessageResult, ThreadFetchResult,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,7 +147,11 @@ impl App {
     }
 
     fn draw(&self, frame: &mut Frame) {
-        ui::draw_app(frame, &self.state, &self.log_buffer.snapshot(LOG_SCREEN_BUFFER_LIMIT));
+        ui::draw_app(
+            frame,
+            &self.state,
+            &self.log_buffer.snapshot(LOG_SCREEN_BUFFER_LIMIT),
+        );
     }
 
     async fn refresh_telegram_state(&mut self) -> Result<()> {
@@ -159,7 +160,10 @@ impl App {
         }
 
         let (login_state, auth_status, chats) = {
-            let telegram = self.telegram.as_mut().expect("telegram availability checked");
+            let telegram = self
+                .telegram
+                .as_mut()
+                .expect("telegram availability checked");
             let login_state = telegram.bootstrap_login().await?;
             let auth_status = telegram.auth_status().await?;
             let chats = match &auth_status {
@@ -237,33 +241,38 @@ impl App {
                     .request_login_code_state()
                     .await
             }
-            Some(LoginInputMode::Code) => self
-                .telegram
-                .as_mut()
-                .expect("telegram availability checked")
-                .submit_login_code_state(&input)
-                .await,
-            Some(LoginInputMode::Password) => self
-                .telegram
-                .as_mut()
-                .expect("telegram availability checked")
-                .submit_password_state(&input)
-                .await,
-            None => match login_phase {
-                Some(LoginPhase::CodeRequested) => self
-                    .telegram
+            Some(LoginInputMode::Code) => {
+                self.telegram
                     .as_mut()
                     .expect("telegram availability checked")
                     .submit_login_code_state(&input)
-                    .await,
-                Some(LoginPhase::PasswordRequired) => self
-                    .telegram
+                    .await
+            }
+            Some(LoginInputMode::Password) => {
+                self.telegram
                     .as_mut()
                     .expect("telegram availability checked")
                     .submit_password_state(&input)
-                    .await,
+                    .await
+            }
+            None => match login_phase {
+                Some(LoginPhase::CodeRequested) => {
+                    self.telegram
+                        .as_mut()
+                        .expect("telegram availability checked")
+                        .submit_login_code_state(&input)
+                        .await
+                }
+                Some(LoginPhase::PasswordRequired) => {
+                    self.telegram
+                        .as_mut()
+                        .expect("telegram availability checked")
+                        .submit_password_state(&input)
+                        .await
+                }
                 _ => {
-                    self.state.set_login_notice("nothing to submit in current login phase");
+                    self.state
+                        .set_login_notice("nothing to submit in current login phase");
                     return Ok(());
                 }
             },
@@ -324,11 +333,11 @@ impl App {
             if self.state.apply_cached_forum_threads() {
                 self.pending_forum_threads_fetch = None;
                 return;
-        }
+            }
 
-        self.state.set_forum_threads_loading();
-        self.pending_forum_threads_fetch = Some(PendingForumThreadsFetch {
-            root_chat_id,
+            self.state.set_forum_threads_loading();
+            self.pending_forum_threads_fetch = Some(PendingForumThreadsFetch {
+                root_chat_id,
                 requested_at: Instant::now() + PREVIEW_FETCH_DEBOUNCE,
             });
             self.pending_thread_fetch = None;
@@ -342,7 +351,8 @@ impl App {
             return;
         };
 
-        let used_cached_thread = self.state.apply_cached_thread() || self.load_thread_from_db(&chat_id);
+        let used_cached_thread =
+            self.state.apply_cached_thread() || self.load_thread_from_db(&chat_id);
         if used_cached_thread {
             info!(chat_id = %chat_id.as_str(), "using cached thread before refresh");
         } else {
@@ -383,7 +393,10 @@ impl App {
             let result = fetch_client
                 .list_forum_topics(&root_chat_id, TELEGRAM_FETCH_FORUM_TOPIC_LIMIT)
                 .await;
-            let _ = tx.send(ForumThreadsFetchResult { root_chat_id, result });
+            let _ = tx.send(ForumThreadsFetchResult {
+                root_chat_id,
+                result,
+            });
         });
     }
 
@@ -465,7 +478,8 @@ impl App {
                         message_count = messages.len(),
                         "thread fetch completed"
                     );
-                    self.state.cache_thread(result.chat_id.clone(), messages.clone());
+                    self.state
+                        .cache_thread(result.chat_id.clone(), messages.clone());
                     if let Err(error) = self.cache.save_messages(&result.chat_id, &messages) {
                         info!(chat_id = %result.chat_id.as_str(), error = %error, "failed to persist message cache");
                     }
@@ -489,7 +503,10 @@ impl App {
             self.in_flight_dialogs_sync = false;
             match result.result {
                 Ok(chats) => {
-                    info!(chat_count = chats.len(), "background dialogs sync completed");
+                    info!(
+                        chat_count = chats.len(),
+                        "background dialogs sync completed"
+                    );
                     self.state.source.sync_status = SyncStatus::Idle;
                     self.state.set_chats(chats.clone());
                     if let Err(error) = self.cache.save_chats(Service::Telegram, &chats) {
@@ -565,9 +582,9 @@ impl App {
     }
 
     fn send_composer_text(&mut self) -> Result<()> {
-        let Some(fetch_client) = self.telegram_fetch_client_or_composer_notice(
-            "telegram client is unavailable",
-        ) else {
+        let Some(fetch_client) =
+            self.telegram_fetch_client_or_composer_notice("telegram client is unavailable")
+        else {
             return Ok(());
         };
 
@@ -593,8 +610,7 @@ impl App {
             is_outgoing: true,
             delivery_state: MessageDeliveryState::Sending,
         };
-        self.state
-            .merge_message(&chat_id, optimistic_message, None);
+        self.state.merge_message(&chat_id, optimistic_message, None);
         self.state.clear_composer();
         self.state.clear_composer_notice();
         self.state.deactivate_composer();
@@ -620,7 +636,10 @@ impl App {
     }
 
     fn load_thread_from_db(&mut self, chat_id: &ChatId) -> bool {
-        match self.cache.load_messages(chat_id, DATABASE_THREAD_LOAD_LIMIT) {
+        match self
+            .cache
+            .load_messages(chat_id, DATABASE_THREAD_LOAD_LIMIT)
+        {
             Ok(messages) if !messages.is_empty() => {
                 self.state.cache_thread(chat_id.clone(), messages);
                 true
@@ -657,7 +676,8 @@ impl App {
 
     fn persist_active_draft(&mut self) -> Result<()> {
         if let Some(chat_id) = self.state.active_chat_id() {
-            self.cache.save_draft(&chat_id, &self.state.composer_input)?;
+            self.cache
+                .save_draft(&chat_id, &self.state.composer_input)?;
             self.loaded_draft_chat_id = Some(chat_id);
         }
         Ok(())
@@ -697,5 +717,4 @@ impl App {
             requested_at: Instant::now() + delay,
         });
     }
-
 }

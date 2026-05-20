@@ -37,7 +37,9 @@ impl CacheStore {
         }
 
         let messages = match chats.first() {
-            Some(first_chat) => self.load_messages(&first_chat.id, MESSAGE_CACHE_LIMIT_PER_CHAT as usize)?,
+            Some(first_chat) => {
+                self.load_messages(&first_chat.id, MESSAGE_CACHE_LIMIT_PER_CHAT as usize)?
+            }
             None => Vec::new(),
         };
 
@@ -65,9 +67,7 @@ impl CacheStore {
                 title: row.get(1)?,
                 last_message_preview: row.get(2)?,
                 unread_count: row.get::<_, i64>(3)? as u32,
-                last_activity_at: row
-                    .get::<_, Option<i64>>(4)?
-                    .map(timestamp_to_system_time),
+                last_activity_at: row.get::<_, Option<i64>>(4)?.map(timestamp_to_system_time),
                 has_subchats: row.get::<_, i64>(5)? != 0,
             })
         })?;
@@ -405,8 +405,12 @@ mod tests {
             .save_messages(&chat.id, std::slice::from_ref(&message))
             .expect("messages should persist");
 
-        let chats = store.load_chats(Service::Telegram).expect("chats should load");
-        let messages = store.load_messages(&chat.id, 50).expect("messages should load");
+        let chats = store
+            .load_chats(Service::Telegram)
+            .expect("chats should load");
+        let messages = store
+            .load_messages(&chat.id, 50)
+            .expect("messages should load");
 
         assert_eq!(chats.len(), 1);
         assert_eq!(chats[0].id.as_str(), chat.id.as_str());
@@ -427,7 +431,9 @@ mod tests {
             .save_messages(&chat.id, std::slice::from_ref(&message))
             .expect("save should succeed");
 
-        let messages = store.load_messages(&chat.id, 50).expect("messages should load");
+        let messages = store
+            .load_messages(&chat.id, 50)
+            .expect("messages should load");
         assert!(messages.is_empty());
 
         let _ = std::fs::remove_file(path);

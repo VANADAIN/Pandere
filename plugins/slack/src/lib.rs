@@ -80,7 +80,9 @@ impl SlackInstallation {
             return Err(anyhow!("slack installer user id must not be empty"));
         }
         if self.bot_access_token.is_none() && self.user_access_token.is_none() {
-            return Err(anyhow!("slack installation must contain at least one access token"));
+            return Err(anyhow!(
+                "slack installation must contain at least one access token"
+            ));
         }
         Ok(())
     }
@@ -155,13 +157,9 @@ fn percent_encode(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'.'
-            | b'_'
-            | b'~' => encoded.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char)
+            }
             _ => encoded.push_str(&format!("%{:02X}", byte)),
         }
     }

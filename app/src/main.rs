@@ -69,7 +69,10 @@ fn maybe_load_telegram_config() -> Result<Option<TelegramConfig>> {
     match TelegramConfig::from_env() {
         Ok(config) => Ok(Some(config)),
         Err(error) => {
-            info!(?error, "telegram config not available; using fixture login state");
+            info!(
+                ?error,
+                "telegram config not available; using fixture login state"
+            );
             Ok(None)
         }
     }

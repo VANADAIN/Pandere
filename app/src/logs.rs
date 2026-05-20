@@ -5,7 +5,7 @@ use std::{
 };
 
 use tracing::{Event, Level, Subscriber, field::Visit};
-use tracing_subscriber::{layer::Context, Layer};
+use tracing_subscriber::{Layer, layer::Context};
 
 const MAX_LOG_LINES: usize = 1000;
 

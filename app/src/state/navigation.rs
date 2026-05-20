@@ -23,7 +23,9 @@ impl AppState {
 
     pub fn selected_root_chat_index(&self) -> Option<usize> {
         let selected = self.selected_root_chat_id.as_ref()?;
-        self.root_chats().iter().position(|chat| &chat.id == selected)
+        self.root_chats()
+            .iter()
+            .position(|chat| &chat.id == selected)
     }
 
     pub fn selected_thread_chat_index(&self) -> Option<usize> {
@@ -192,7 +194,8 @@ impl AppState {
     pub fn thread_placeholder(&self) -> String {
         match &self.messenger_view {
             MessengerView::Root => match self.selected_root_chat() {
-                Some(_chat) if self.selected_root_has_threads() => match &self.forum_threads_status {
+                Some(_chat) if self.selected_root_has_threads() => match &self.forum_threads_status
+                {
                     ThreadStatus::Idle => {
                         "Supergroup preview. Press Right to enter threads.".into()
                     }
