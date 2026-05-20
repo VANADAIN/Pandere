@@ -58,6 +58,13 @@ pub struct ChatSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageDeliveryState {
+    Sent,
+    Sending,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub id: MessageId,
     pub chat_id: ChatId,
@@ -66,6 +73,7 @@ pub struct Message {
     pub text: String,
     pub sent_at: SystemTime,
     pub is_outgoing: bool,
+    pub delivery_state: MessageDeliveryState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

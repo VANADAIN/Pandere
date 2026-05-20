@@ -15,7 +15,7 @@ use grammers_session::types::PeerRef;
 use grammers_session::types::PeerId;
 use grammers_session::storages::SqliteSession;
 use pandere_core::paths::pandere_paths;
-use pandere_core::{ChatId, ChatSummary, Message, MessageId, Service};
+use pandere_core::{ChatId, ChatSummary, Message, MessageDeliveryState, MessageId, Service};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::info;
@@ -447,6 +447,29 @@ impl TelegramClient {
 }
 
 impl TelegramFetchClient {
+    pub async fn list_chats(&self, limit: usize) -> Result<Vec<ChatSummary>> {
+        let mut dialogs = self.client.iter_dialogs();
+        let mut chats = Vec::with_capacity(limit.min(64));
+
+        while chats.len() < limit {
+            let Some(dialog) = dialogs
+                .next()
+                .await
+                .context("failed to fetch telegram dialogs")?
+            else {
+                break;
+            };
+
+            self.peer_refs
+                .write()
+                .await
+                .insert(dialog.peer().id().bot_api_dialog_id(), dialog.peer_ref());
+            chats.push(map_dialog(dialog));
+        }
+
+        Ok(chats)
+    }
+
     pub async fn list_forum_topics(&self, chat_id: &ChatId, limit: usize) -> Result<Vec<ChatSummary>> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -702,6 +725,7 @@ fn map_message(chat_id: ChatId, message: grammers_client::message::Message) -> M
         text: message.text().to_owned(),
         sent_at: timestamp_to_system_time(message.date().timestamp()),
         is_outgoing: message.outgoing(),
+        delivery_state: MessageDeliveryState::Sent,
     }
 }
 
@@ -758,6 +782,7 @@ fn map_raw_message(
         text: raw_message_text(&raw).unwrap_or_default().to_owned(),
         sent_at: timestamp_to_system_time(raw_message_timestamp(&raw) as i64),
         is_outgoing: raw_message_outgoing(&raw),
+        delivery_state: MessageDeliveryState::Sent,
     }
 }
 

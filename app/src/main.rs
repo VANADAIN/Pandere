@@ -1,4 +1,5 @@
 mod app;
+mod cache;
 mod data_source;
 mod fixtures;
 mod logs;
@@ -15,6 +16,7 @@ use tracing_subscriber::{EnvFilter, prelude::*};
 
 use crate::{
     app::App,
+    cache::CacheStore,
     fixtures::HostBackedFixtureSource,
     logs::{LogBuffer, LogBufferLayer},
     plugin::bootstrap_dummy_registry,
@@ -43,6 +45,7 @@ async fn main() -> Result<()> {
     );
 
     let registry = bootstrap_dummy_registry();
+    let cache = CacheStore::open_default()?;
     let telegram_config = maybe_load_telegram_config()?;
     let telegram = maybe_connect_telegram(telegram_config.clone()).await?;
     let source = HostBackedFixtureSource::new(
@@ -52,7 +55,7 @@ async fn main() -> Result<()> {
             .expect("dummy registry should contain a messenger"),
     );
     let state = AppState::new(source, registry)?;
-    let mut app = App::new(state, telegram_config, telegram, log_buffer);
+    let mut app = App::new(state, telegram_config, telegram, log_buffer, cache);
     app.initialize().await?;
     let mut terminal = TerminalGuard::setup()?;
     app.run(terminal.terminal()).await

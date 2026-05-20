@@ -10,6 +10,10 @@ pub struct PanderePaths {
 }
 
 impl PanderePaths {
+    pub fn database_path(&self) -> PathBuf {
+        self.data_dir.join("pandere.sqlite3")
+    }
+
     pub fn plugin_install_dir(&self) -> PathBuf {
         self.data_dir.join("plugins")
     }

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Local};
-use pandere_core::Message;
+use pandere_core::{Message, MessageDeliveryState};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -345,6 +345,7 @@ fn render_message_lines(message: &Message, content_width: usize) -> Vec<Line<'st
             base_text_style().add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!("  {timestamp}"), muted_text_style()),
+        Span::styled(delivery_suffix(message), delivery_style(message)),
     ]));
 
     if message.text.is_empty() {
@@ -368,6 +369,22 @@ fn render_message_lines(message: &Message, content_width: usize) -> Vec<Line<'st
     )));
     lines.push(Line::from(""));
     lines
+}
+
+fn delivery_suffix(message: &Message) -> String {
+    match message.delivery_state {
+        MessageDeliveryState::Sent => String::new(),
+        MessageDeliveryState::Sending => "  [sending]".into(),
+        MessageDeliveryState::Failed => "  [failed]".into(),
+    }
+}
+
+fn delivery_style(message: &Message) -> Style {
+    match message.delivery_state {
+        MessageDeliveryState::Sent => muted_text_style(),
+        MessageDeliveryState::Sending => Style::default().fg(Color::Yellow),
+        MessageDeliveryState::Failed => Style::default().fg(Color::LightRed),
+    }
 }
 
 fn format_message_timestamp(message: &Message) -> String {

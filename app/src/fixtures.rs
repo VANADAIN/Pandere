@@ -1,7 +1,7 @@
 use std::time::SystemTime;
 
 use anyhow::Result;
-use pandere_core::{ChatId, ChatSummary, Message, MessageId, Service};
+use pandere_core::{ChatId, ChatSummary, Message, MessageDeliveryState, MessageId, Service};
 
 use crate::data_source::{AuthStatus, MessengerDataSource, MessengerSnapshot, SyncStatus};
 use crate::plugin::{LoadedMessenger, PluginLoadStatus};
@@ -50,6 +50,7 @@ pub fn fixture_messages(chats: &[ChatSummary]) -> Vec<Message> {
             text: "Workspace scaffold landed.".into(),
             sent_at: SystemTime::now(),
             is_outgoing: false,
+            delivery_state: MessageDeliveryState::Sent,
         },
         Message {
             id: MessageId::new("m2"),
@@ -59,6 +60,7 @@ pub fn fixture_messages(chats: &[ChatSummary]) -> Vec<Message> {
             text: "Next: core model, WIT, fixture shell.".into(),
             sent_at: SystemTime::now(),
             is_outgoing: true,
+            delivery_state: MessageDeliveryState::Sent,
         },
         Message {
             id: MessageId::new("m3"),
@@ -68,6 +70,7 @@ pub fn fixture_messages(chats: &[ChatSummary]) -> Vec<Message> {
             text: "Keep host light. Push service logic into plugins.".into(),
             sent_at: SystemTime::now(),
             is_outgoing: false,
+            delivery_state: MessageDeliveryState::Sent,
         },
     ]
 }

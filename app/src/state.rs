@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use pandere_core::{ChatId, ChatSummary, Message, Service};
+use pandere_core::{ChatId, ChatSummary, Message, MessageDeliveryState, MessageId, Service};
 use pandere_plugin_telegram::{LoginPhase, LoginState};
 
 use crate::{
@@ -218,10 +218,6 @@ impl AppState {
             .collect()
     }
 
-    pub fn chats(&self) -> &[ChatSummary] {
-        &self.source.chats
-    }
-
     pub fn root_chats(&self) -> Vec<&ChatSummary> {
         self.source
             .chats
@@ -247,7 +243,16 @@ impl AppState {
 
     pub fn selected_leaf_chat(&self) -> Option<&ChatSummary> {
         let chat_id = self.active_chat_id()?;
-        self.source.chats.iter().find(|chat| chat.id == chat_id)
+        self.source
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .or_else(|| {
+                self.forum_threads
+                    .values()
+                    .flat_map(|threads| threads.iter())
+                    .find(|chat| chat.id == chat_id)
+            })
     }
 
     pub fn messages(&self) -> Vec<Message> {
@@ -316,6 +321,16 @@ impl AppState {
         self.forum_threads_status = ThreadStatus::Idle;
         self.thread_status = ThreadStatus::Idle;
         self.reset_thread_scroll();
+    }
+
+    pub fn set_chats(&mut self, chats: Vec<ChatSummary>) {
+        let previously_selected = self.selected_root_chat_id.clone();
+        self.source.chats = chats;
+        let root_chats = self.root_chats();
+        self.selected_root_chat_id = previously_selected
+            .filter(|selected| root_chats.iter().any(|chat| chat.id == *selected))
+            .or_else(|| root_chats.first().map(|chat| chat.id.clone()));
+        self.sync_selected_thread_to_root();
     }
 
     pub fn select_next_root_chat(&mut self) {
@@ -418,6 +433,7 @@ impl AppState {
 
     pub fn cache_thread(&mut self, chat_id: ChatId, messages: Vec<Message>) {
         self.thread_cache.insert(chat_id.clone(), messages.clone());
+        self.refresh_chat_preview_from_messages(&chat_id);
         if self.preview_chat_id().as_ref() == Some(&chat_id) {
             self.source.messages = messages;
             self.thread_status = ThreadStatus::Idle;
@@ -509,6 +525,10 @@ impl AppState {
 
     pub fn clear_composer(&mut self) {
         self.composer_input.clear();
+    }
+
+    pub fn set_composer_input(&mut self, value: String) {
+        self.composer_input = value;
     }
 
     pub fn push_composer_input(&mut self, ch: char) {
@@ -626,6 +646,64 @@ impl AppState {
         self.thread_scroll = 0;
         self.follow_thread_bottom = true;
     }
+
+    pub fn merge_message(
+        &mut self,
+        chat_id: &ChatId,
+        message: Message,
+        replacing_message_id: Option<&MessageId>,
+    ) {
+        {
+            let thread = self.thread_cache.entry(chat_id.clone()).or_default();
+            if let Some(message_id) = replacing_message_id {
+                if let Some(existing) = thread.iter_mut().find(|item| &item.id == message_id) {
+                    *existing = message.clone();
+                } else {
+                    thread.push(message.clone());
+                }
+            } else if let Some(existing) = thread.iter_mut().find(|item| item.id == message.id) {
+                *existing = message.clone();
+            } else {
+                thread.push(message.clone());
+            }
+
+            sort_messages(thread);
+        }
+
+        let is_preview = self.preview_chat_id().as_ref() == Some(chat_id);
+        self.refresh_chat_preview_from_messages(chat_id);
+
+        if is_preview {
+            if let Some(thread) = self.thread_cache.get(chat_id).cloned() {
+                self.source.messages = thread;
+            }
+            self.thread_status = ThreadStatus::Idle;
+            if self.follow_thread_bottom {
+                self.reset_thread_scroll();
+            }
+        }
+    }
+
+    pub fn mark_message_delivery(
+        &mut self,
+        chat_id: &ChatId,
+        message_id: &MessageId,
+        delivery_state: MessageDeliveryState,
+    ) {
+        let is_preview = self.preview_chat_id().as_ref() == Some(chat_id);
+        if let Some(thread) = self.thread_cache.get_mut(chat_id) {
+            if let Some(message) = thread.iter_mut().find(|item| &item.id == message_id) {
+                message.delivery_state = delivery_state;
+            }
+            if is_preview {
+                self.source.messages = thread.clone();
+            }
+        }
+    }
+
+    pub fn thread_messages(&self, chat_id: &ChatId) -> Option<Vec<Message>> {
+        self.thread_cache.get(chat_id).cloned()
+    }
 }
 
 fn fallback_messenger() -> LoadedMessenger {
@@ -646,6 +724,9 @@ pub(crate) fn build_thread_cache(messages: &[Message]) -> HashMap<ChatId, Vec<Me
     let mut cache: HashMap<ChatId, Vec<Message>> = HashMap::new();
     for message in messages {
         cache.entry(message.chat_id.clone()).or_default().push(message.clone());
+    }
+    for messages in cache.values_mut() {
+        sort_messages(messages);
     }
     cache
 }
@@ -672,4 +753,40 @@ impl AppState {
 
         self.selected_thread_chat_id = thread_chats.first().map(|chat| chat.id.clone());
     }
+
+    fn refresh_chat_preview_from_messages(&mut self, chat_id: &ChatId) {
+        let preview = self.thread_cache.get(chat_id).and_then(|messages| {
+            messages.last().map(|message| {
+                (
+                    message.text.clone(),
+                    Some(message.sent_at),
+                )
+            })
+        });
+
+        let Some((text, sent_at)) = preview else {
+            return;
+        };
+
+        if let Some(chat) = self.source.chats.iter_mut().find(|chat| &chat.id == chat_id) {
+            chat.last_message_preview = Some(text.clone());
+            chat.last_activity_at = sent_at;
+        }
+
+        for threads in self.forum_threads.values_mut() {
+            if let Some(chat) = threads.iter_mut().find(|chat| &chat.id == chat_id) {
+                chat.last_message_preview = Some(text.clone());
+                chat.last_activity_at = sent_at;
+            }
+        }
+    }
+}
+
+fn sort_messages(messages: &mut [Message]) {
+    messages.sort_by_key(|message| {
+        (
+            message.sent_at,
+            message.id.as_str().to_owned(),
+        )
+    });
 }
