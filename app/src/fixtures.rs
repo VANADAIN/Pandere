@@ -79,11 +79,27 @@ pub struct FixtureMessengerSource;
 
 impl MessengerDataSource for FixtureMessengerSource {
     fn snapshot(&self) -> Result<MessengerSnapshot> {
-        let chats = fixture_chats();
-        let messages = fixture_messages(&chats);
+        Self::snapshot_for(Service::Telegram)
+    }
+}
+
+impl FixtureMessengerSource {
+    pub fn snapshot_for(service: Service) -> Result<MessengerSnapshot> {
+        let (chats, messages) = match service {
+            Service::Telegram => {
+                let chats = fixture_chats();
+                let messages = fixture_messages(&chats);
+                (chats, messages)
+            }
+            Service::Slack => {
+                let chats = slack_fixture_chats();
+                let messages = slack_fixture_messages(&chats);
+                (chats, messages)
+            }
+        };
 
         Ok(MessengerSnapshot {
-            service: Service::Telegram,
+            service,
             auth_status: AuthStatus::NeedsLogin,
             sync_status: SyncStatus::Pending,
             chats,
@@ -104,8 +120,9 @@ impl HostBackedFixtureSource {
 
 impl MessengerDataSource for HostBackedFixtureSource {
     fn snapshot(&self) -> Result<MessengerSnapshot> {
-        let chats = fixture_chats();
-        let messages = fixture_messages(&chats);
+        let snapshot = FixtureMessengerSource::snapshot_for(self.messenger.manifest.service)?;
+        let chats = snapshot.chats;
+        let messages = snapshot.messages;
 
         let (auth_status, sync_status) = match &self.messenger.status {
             PluginLoadStatus::Loaded => (AuthStatus::NeedsLogin, SyncStatus::Pending),
@@ -127,4 +144,63 @@ impl MessengerDataSource for HostBackedFixtureSource {
             messages,
         })
     }
+}
+
+fn slack_fixture_chats() -> Vec<ChatSummary> {
+    vec![
+        ChatSummary {
+            id: ChatId::new("slack:C-general"),
+            service: Service::Slack,
+            title: "#general".into(),
+            last_message_preview: Some("Slack install flow next.".into()),
+            unread_count: 0,
+            last_activity_at: Some(SystemTime::now()),
+            has_subchats: false,
+        },
+        ChatSummary {
+            id: ChatId::new("slack:C-builds"),
+            service: Service::Slack,
+            title: "#builds".into(),
+            last_message_preview: Some("CI green after refactor.".into()),
+            unread_count: 2,
+            last_activity_at: Some(SystemTime::now()),
+            has_subchats: false,
+        },
+        ChatSummary {
+            id: ChatId::new("slack:D-product"),
+            service: Service::Slack,
+            title: "Product DM".into(),
+            last_message_preview: Some("Need OAuth callback helper.".into()),
+            unread_count: 1,
+            last_activity_at: Some(SystemTime::now()),
+            has_subchats: false,
+        },
+    ]
+}
+
+fn slack_fixture_messages(chats: &[ChatSummary]) -> Vec<Message> {
+    let primary_chat = chats[0].id.clone();
+
+    vec![
+        Message {
+            id: MessageId::new("slack:m1"),
+            chat_id: primary_chat.clone(),
+            service: Service::Slack,
+            author_name: "Casey".into(),
+            text: "Need install URL surfaced in the app.".into(),
+            sent_at: SystemTime::now(),
+            is_outgoing: false,
+            delivery_state: MessageDeliveryState::Sent,
+        },
+        Message {
+            id: MessageId::new("slack:m2"),
+            chat_id: primary_chat,
+            service: Service::Slack,
+            author_name: "You".into(),
+            text: "Generic messenger service is ready for it.".into(),
+            sent_at: SystemTime::now(),
+            is_outgoing: true,
+            delivery_state: MessageDeliveryState::Sent,
+        },
+    ]
 }

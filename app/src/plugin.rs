@@ -62,6 +62,10 @@ impl PluginRegistry {
     pub fn all(&self) -> &[LoadedMessenger] {
         &self.messengers
     }
+
+    pub fn for_service(&self, service: Service) -> Option<&LoadedMessenger> {
+        self.messengers.iter().find(|messenger| messenger.manifest.service == service)
+    }
 }
 
 pub fn bootstrap_dummy_registry() -> PluginRegistry {

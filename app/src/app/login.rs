@@ -4,7 +4,7 @@ use tracing::info;
 use super::App;
 use crate::{
     constants::{TELEGRAM_ENV_NOTICE, TELEGRAM_FETCH_DIALOG_LIMIT},
-    data_source::{AuthStatus, MessengerDataSource, SyncStatus},
+    data_source::{AuthStatus, SyncStatus},
     fixtures::FixtureMessengerSource,
     messenger_service::{LoginInputMode, LoginPhase, MessengerAuthStatus},
 };
@@ -50,7 +50,7 @@ impl App {
                 self.schedule_preview_fetch();
             }
             MessengerAuthStatus::NeedsLogin | MessengerAuthStatus::Connected => {
-                let fixture = FixtureMessengerSource.snapshot()?;
+                let fixture = FixtureMessengerSource::snapshot_for(service)?;
                 self.state.source.service = service;
                 self.state.source.auth_status = AuthStatus::NeedsLogin;
                 self.state.source.sync_status = SyncStatus::Pending;

@@ -11,6 +11,7 @@ chrono = { version = "0.4", default-features = true, features = ["clock"] }
 crossterm = "0.29"
 pandere-core = { path = "../core" }
 pandere-plugin-host = { path = "../plugin-host" }
+pandere-plugin-slack = { path = "../plugins/slack" }
 pandere-plugin-telegram = { path = "../plugins/telegram" }
 ratatui = "0.29"
 rusqlite = { version = "0.37", features = ["bundled"] }

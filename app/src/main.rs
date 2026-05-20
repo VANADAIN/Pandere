@@ -12,6 +12,7 @@ mod ui;
 
 use anyhow::Result;
 use pandere_core::paths::pandere_paths;
+use pandere_plugin_slack::SlackOAuthConfig;
 use pandere_plugin_telegram::TelegramConfig;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, prelude::*};
@@ -50,16 +51,25 @@ async fn main() -> Result<()> {
 
     let registry = bootstrap_dummy_registry();
     let cache = CacheStore::open_default()?;
-    let telegram_config = maybe_load_telegram_config()?;
-    let telegram = maybe_connect_telegram(telegram_config.clone()).await?;
+    let messenger = maybe_connect_messenger().await?;
+    let active_service = messenger
+        .as_ref()
+        .map(|messenger| messenger.service())
+        .unwrap_or_else(|| {
+            registry
+                .primary()
+                .map(|messenger| messenger.manifest.service)
+                .unwrap_or(pandere_core::Service::Telegram)
+        });
     let source = HostBackedFixtureSource::new(
         registry
-            .primary()
+            .for_service(active_service)
+            .or_else(|| registry.primary())
             .cloned()
             .expect("dummy registry should contain a messenger"),
     );
     let state = AppState::new(source, registry)?;
-    let mut app = App::new(state, telegram, log_buffer, cache);
+    let mut app = App::new(state, messenger, log_buffer, cache);
     app.initialize().await?;
     let mut terminal = TerminalGuard::setup()?;
     app.run(terminal.terminal()).await
@@ -86,4 +96,30 @@ async fn maybe_connect_telegram(
     };
 
     Ok(Some(Box::new(TelegramService::connect(config).await?)))
+}
+
+fn maybe_load_slack_config() -> Result<Option<SlackOAuthConfig>> {
+    match SlackOAuthConfig::from_env() {
+        Ok(config) => Ok(Some(config)),
+        Err(error) => {
+            info!(?error, "slack config not available");
+            Ok(None)
+        }
+    }
+}
+
+async fn maybe_connect_messenger() -> Result<Option<Box<dyn MessengerService>>> {
+    let telegram_config = maybe_load_telegram_config()?;
+    if let Some(telegram) = maybe_connect_telegram(telegram_config).await? {
+        return Ok(Some(telegram));
+    }
+
+    let slack_config = maybe_load_slack_config()?;
+    if let Some(config) = slack_config {
+        return Ok(Some(Box::new(crate::messenger_service::SlackService::connect(
+            config,
+        )?)));
+    }
+
+    Ok(None)
 }

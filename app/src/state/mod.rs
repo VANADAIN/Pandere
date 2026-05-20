@@ -78,10 +78,12 @@ pub struct AppState {
     pub login_notice: Option<String>,
     pub login_identifier_label: Option<String>,
     pub login_identifier_value: Option<String>,
-    pub login_session_label: Option<String>,
+    pub login_session_field_label: Option<String>,
+    pub login_session_value: Option<String>,
     pub login_has_saved_session: bool,
     pub login_password_hint: Option<String>,
     pub login_account_label: Option<String>,
+    pub login_help_lines: Vec<String>,
     pub forum_threads: HashMap<ChatId, Vec<ChatSummary>>,
     pub forum_threads_status: ThreadStatus,
     pub thread_cache: HashMap<ChatId, Vec<Message>>,
@@ -112,10 +114,12 @@ impl AppState {
             login_notice: None,
             login_identifier_label: None,
             login_identifier_value: None,
-            login_session_label: None,
+            login_session_field_label: None,
+            login_session_value: None,
             login_has_saved_session: false,
             login_password_hint: None,
             login_account_label: None,
+            login_help_lines: Vec::new(),
             forum_threads: HashMap::new(),
             forum_threads_status: ThreadStatus::Idle,
             thread_cache,
@@ -166,10 +170,12 @@ impl AppState {
         self.login_input_mode = state.input_mode;
         self.login_identifier_label = state.identifier_label;
         self.login_identifier_value = state.identifier_value;
-        self.login_session_label = state.session_label;
+        self.login_session_field_label = state.session_field_label;
+        self.login_session_value = state.session_value;
         self.login_has_saved_session = state.has_saved_session;
         self.login_password_hint = state.password_hint;
         self.login_account_label = state.account_label;
+        self.login_help_lines = state.help_lines;
 
         match self.login_input_mode {
             Some(LoginInputMode::Identifier) => self.login_input = identifier_value,
@@ -293,7 +299,7 @@ impl AppState {
     pub fn login_lines(&self) -> Vec<String> {
         let plugin = self
             .registry
-            .primary()
+            .for_service(self.source.service)
             .cloned()
             .unwrap_or_else(fallback_messenger);
         let component_path = plugin
@@ -314,8 +320,12 @@ impl AppState {
             .login_identifier_value
             .as_deref()
             .unwrap_or("not configured");
-        let session_label = self
-            .login_session_label
+        let session_field_label = self
+            .login_session_field_label
+            .as_deref()
+            .unwrap_or("Session");
+        let session_value = self
+            .login_session_value
             .as_deref()
             .unwrap_or("not configured");
         let account_label = self.login_account_label.as_deref().unwrap_or("-");
@@ -335,7 +345,7 @@ impl AppState {
             format!("Component: {component_path}"),
             format!("Login phase: {phase_label}"),
             format!("{identifier_label}: {identifier_value}"),
-            format!("Session: {session_label}"),
+            format!("{session_field_label}: {session_value}"),
             format!("Saved session: {}", self.login_has_saved_session),
             format!("Authorized account: {account_label}"),
             format!("Auth: {}", self.source.auth_status.label()),
@@ -356,13 +366,11 @@ impl AppState {
             lines.push(format!("Notice: {notice}"));
         }
 
-        lines.push(String::new());
-        lines.push("Login controls:".into());
-        lines.push("enter advances current login step".into());
-        lines.push("r request or refresh code".into());
-        lines.push("x logout and clear saved session".into());
-        lines.push("backspace edit input".into());
-        lines.push("esc clear input/notice".into());
+        if !self.login_help_lines.is_empty() {
+            lines.push(String::new());
+            lines.push("Login help:".into());
+            lines.extend(self.login_help_lines.iter().cloned());
+        }
 
         lines
     }

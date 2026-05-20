@@ -277,4 +277,44 @@ mod tests {
 
         assert_eq!(state.selected_root_chat_id, Some(selected_chat_id));
     }
+
+    #[test]
+    fn cache_forum_threads_selects_first_subchat_for_preview() {
+        let mut state = test_state();
+        let root_chat = ChatSummary {
+            id: ChatId::new("telegram:-100:root"),
+            service: Service::Telegram,
+            title: "Forum Root".into(),
+            last_message_preview: None,
+            unread_count: 0,
+            last_activity_at: None,
+            has_subchats: true,
+        };
+        state.set_chats(vec![root_chat.clone()]);
+        state.selected_root_chat_id = Some(root_chat.id.clone());
+
+        let topic_a = ChatSummary {
+            id: ChatId::new("telegram:-100:topic:1"),
+            service: Service::Telegram,
+            title: "Forum Root / Topic A".into(),
+            last_message_preview: Some("a".into()),
+            unread_count: 0,
+            last_activity_at: None,
+            has_subchats: false,
+        };
+        let topic_b = ChatSummary {
+            id: ChatId::new("telegram:-100:topic:2"),
+            service: Service::Telegram,
+            title: "Forum Root / Topic B".into(),
+            last_message_preview: Some("b".into()),
+            unread_count: 0,
+            last_activity_at: None,
+            has_subchats: false,
+        };
+
+        state.cache_forum_threads(root_chat.id.clone(), vec![topic_a.clone(), topic_b]);
+
+        assert_eq!(state.selected_thread_chat_id, Some(topic_a.id.clone()));
+        assert_eq!(state.preview_chat_id(), Some(topic_a.id));
+    }
 }

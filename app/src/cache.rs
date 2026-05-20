@@ -172,7 +172,10 @@ impl CacheStore {
     }
 }
 
-fn map_chat_summary_row(row: &rusqlite::Row<'_>, service: Service) -> rusqlite::Result<ChatSummary> {
+fn map_chat_summary_row(
+    row: &rusqlite::Row<'_>,
+    service: Service,
+) -> rusqlite::Result<ChatSummary> {
     Ok(ChatSummary {
         id: ChatId::new(row.get::<_, String>(0)?),
         service,
@@ -416,6 +419,18 @@ mod tests {
         }
     }
 
+    fn sample_slack_chat() -> ChatSummary {
+        ChatSummary {
+            id: ChatId::new("slack:C-general"),
+            service: Service::Slack,
+            title: "#general".into(),
+            last_message_preview: Some("hello slack".into()),
+            unread_count: 2,
+            last_activity_at: Some(SystemTime::now()),
+            has_subchats: false,
+        }
+    }
+
     fn sample_message(delivery_state: MessageDeliveryState) -> Message {
         Message {
             id: MessageId::new("telegram:1:100"),
@@ -493,6 +508,35 @@ mod tests {
 
         store.clear_draft(&chat_id).expect("draft should clear");
         assert_eq!(store.load_draft(&chat_id).expect("draft should load"), None);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cache_keeps_services_separate() {
+        let path = temp_db_path("multi-service");
+        let mut store = CacheStore::open(&path).expect("cache db should open");
+        let telegram_chat = sample_chat();
+        let slack_chat = sample_slack_chat();
+
+        store
+            .save_chats(Service::Telegram, std::slice::from_ref(&telegram_chat))
+            .expect("telegram chats should persist");
+        store
+            .save_chats(Service::Slack, std::slice::from_ref(&slack_chat))
+            .expect("slack chats should persist");
+
+        let telegram = store
+            .load_chats(Service::Telegram)
+            .expect("telegram chats should load");
+        let slack = store
+            .load_chats(Service::Slack)
+            .expect("slack chats should load");
+
+        assert_eq!(telegram.len(), 1);
+        assert_eq!(telegram[0].service, Service::Telegram);
+        assert_eq!(slack.len(), 1);
+        assert_eq!(slack[0].service, Service::Slack);
 
         let _ = std::fs::remove_file(path);
     }
