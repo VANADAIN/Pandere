@@ -1,5 +1,6 @@
 mod app;
 mod cache;
+mod constants;
 mod data_source;
 mod fixtures;
 mod logs;
@@ -18,6 +19,7 @@ use tracing_subscriber::{EnvFilter, prelude::*};
 use crate::{
     app::App,
     cache::CacheStore,
+    constants::APP_TITLE,
     fixtures::HostBackedFixtureSource,
     logs::{LogBuffer, LogBufferLayer},
     messenger_service::TelegramService,
@@ -35,7 +37,7 @@ async fn main() -> Result<()> {
         .with(LogBufferLayer::new(log_buffer.clone()))
         .init();
 
-    info!("starting pandere host-backed shell");
+    info!("starting {APP_TITLE}");
     let paths = pandere_paths();
     paths.ensure_exists()?;
     info!(

@@ -1,11 +1,14 @@
+mod runtime;
+mod types;
+
 use std::{
     collections::HashSet,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode};
-use pandere_core::{ChatId, ChatSummary, Message, MessageDeliveryState, MessageId, Service};
+use crossterm::event::{self, Event};
+use pandere_core::{ChatId, Message, MessageDeliveryState, MessageId, Service};
 use pandere_plugin_telegram::{AuthStatus as TelegramAuthStatus, LoginPhase};
 use ratatui::{Frame, Terminal, prelude::CrosstermBackend};
 use tokio::sync::mpsc;
@@ -13,13 +16,23 @@ use tracing::info;
 
 use crate::{
     cache::CacheStore,
+    constants::{
+        BACKGROUND_SYNC_INTERVAL, DATABASE_THREAD_LOAD_LIMIT, EVENT_POLL_INTERVAL,
+        INITIAL_BACKGROUND_SYNC_DELAY, LOG_SCREEN_BUFFER_LIMIT, PREVIEW_FETCH_DEBOUNCE,
+        TELEGRAM_ENV_NOTICE, TELEGRAM_FETCH_DIALOG_LIMIT, TELEGRAM_FETCH_FORUM_TOPIC_LIMIT,
+        TELEGRAM_FETCH_MESSAGE_LIMIT,
+    },
     data_source::MessengerDataSource,
     data_source::{AuthStatus, SyncStatus},
     fixtures::FixtureMessengerSource,
     logs::LogBuffer,
     messenger_service::TelegramService,
-    state::{AppState, LoginInputMode, MessengerFocus},
+    state::{AppState, LoginInputMode},
     ui,
+};
+use self::types::{
+    DialogsSyncResult, ForumThreadsFetchResult, LeftPaneDirection, PendingForumThreadsFetch,
+    PendingThreadFetch, SendMessageResult, ThreadFetchResult,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +95,7 @@ impl App {
             in_flight_threads: HashSet::new(),
             in_flight_forum_threads: HashSet::new(),
             in_flight_dialogs_sync: false,
-            next_background_sync_at: Instant::now() + Duration::from_secs(15),
+            next_background_sync_at: Instant::now() + INITIAL_BACKGROUND_SYNC_DELAY,
             loaded_draft_chat_id: None,
             next_optimistic_message_id: 0,
         }
@@ -112,7 +125,7 @@ impl App {
             self.maybe_start_background_sync();
             terminal.draw(|frame| self.draw(frame))?;
 
-            if !event::poll(Duration::from_millis(50))? {
+            if !event::poll(EVENT_POLL_INTERVAL)? {
                 continue;
             }
 
@@ -120,86 +133,16 @@ impl App {
                 continue;
             };
 
-            if self.state.screen == Screen::Login {
-                match key.code {
-                    KeyCode::Char('r') => {
-                        self.request_login_code().await?;
-                        continue;
-                    }
-                    KeyCode::Char('x') => {
-                        self.logout_telegram().await?;
-                        continue;
-                    }
-                    KeyCode::Enter => {
-                        self.submit_login_input().await?;
-                        continue;
-                    }
-                    KeyCode::Backspace => {
-                        self.state.pop_login_input();
-                        continue;
-                    }
-                    KeyCode::Esc => {
-                        self.state.clear_login_input();
-                        self.state.clear_login_notice();
-                        continue;
-                    }
-                    KeyCode::Char(ch) if self.state.login_input_mode.is_some() && !ch.is_control() => {
-                        self.state.push_login_input(ch);
-                        continue;
-                    }
-                    _ => {}
-                }
+            if self.handle_login_key(key).await? {
+                continue;
             }
 
-            if self.state.screen == Screen::Messenger && self.state.composer_active {
-                match key.code {
-                    KeyCode::Enter => {
-                        self.send_composer_text()?;
-                        continue;
-                    }
-                    KeyCode::Backspace => {
-                        self.state.pop_composer_input();
-                        self.persist_active_draft()?;
-                        continue;
-                    }
-                    KeyCode::Esc => {
-                        self.state.deactivate_composer();
-                        self.state.clear_composer_notice();
-                        self.persist_active_draft()?;
-                        continue;
-                    }
-                    KeyCode::Char(ch) if !ch.is_control() => {
-                        self.state.push_composer_input(ch);
-                        self.persist_active_draft()?;
-                        continue;
-                    }
-                    _ => {}
-                }
+            if self.handle_composer_key(key)? {
+                continue;
             }
 
-            match key.code {
-                KeyCode::Char('q') => break,
-                KeyCode::Char('1') => self.state.screen = Screen::Main,
-                KeyCode::Char('2') => self.state.screen = Screen::Login,
-                KeyCode::Char('3') => self.state.screen = Screen::Messenger,
-                KeyCode::Char('0') => self.state.screen = Screen::Logs,
-                KeyCode::Char('c') if self.state.screen == Screen::Messenger => {
-                    self.state.activate_composer();
-                    self.sync_draft_for_active_chat()?;
-                }
-                KeyCode::Up if self.state.screen == Screen::Messenger => {
-                    self.handle_messenger_up()?;
-                }
-                KeyCode::Down if self.state.screen == Screen::Messenger => {
-                    self.handle_messenger_down()?;
-                }
-                KeyCode::Right if self.state.screen == Screen::Messenger => {
-                    self.handle_messenger_right()?;
-                }
-                KeyCode::Left if self.state.screen == Screen::Messenger => {
-                    self.handle_messenger_left()?;
-                }
-                _ => {}
+            if self.handle_global_key(key).await? {
+                break;
             }
         }
 
@@ -207,25 +150,34 @@ impl App {
     }
 
     fn draw(&self, frame: &mut Frame) {
-        ui::draw_app(frame, &self.state, &self.log_buffer.snapshot(500));
+        ui::draw_app(frame, &self.state, &self.log_buffer.snapshot(LOG_SCREEN_BUFFER_LIMIT));
     }
 
     async fn refresh_telegram_state(&mut self) -> Result<()> {
-        let Some(telegram) = self.telegram.as_mut() else {
-            self.state.set_login_notice(
-                "telegram env is not configured; set TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE",
-            );
+        if !self.ensure_telegram_login_available(TELEGRAM_ENV_NOTICE) {
             return Ok(());
+        }
+
+        let (login_state, auth_status, chats) = {
+            let telegram = self.telegram.as_mut().expect("telegram availability checked");
+            let login_state = telegram.bootstrap_login().await?;
+            let auth_status = telegram.auth_status().await?;
+            let chats = match &auth_status {
+                TelegramAuthStatus::Authorized { .. } => {
+                    Some(telegram.list_chats(TELEGRAM_FETCH_DIALOG_LIMIT).await?)
+                }
+                TelegramAuthStatus::NeedsLogin | TelegramAuthStatus::Connected => None,
+            };
+            (login_state, auth_status, chats)
         };
 
-        let login_state = telegram.bootstrap_login().await?;
         self.state.apply_login_state(login_state);
 
-        match telegram.auth_status().await? {
+        match auth_status {
             TelegramAuthStatus::Authorized { user_label } => {
                 self.state.source.auth_status = AuthStatus::Authenticated(user_label);
                 self.state.source.sync_status = SyncStatus::Idle;
-                let chats = telegram.list_chats(500).await?;
+                let chats = chats.expect("authorized telegram state should include chat list");
                 self.state.set_chats(chats.clone());
                 self.cache.save_chats(Service::Telegram, &chats)?;
                 self.schedule_preview_fetch();
@@ -247,22 +199,24 @@ impl App {
     }
 
     async fn request_login_code(&mut self) -> Result<()> {
-        let Some(telegram) = self.telegram.as_mut() else {
-            self.state.set_login_notice("telegram client is unavailable");
+        if !self.ensure_telegram_login_available("telegram client is unavailable") {
             return Ok(());
-        };
+        }
 
         info!("requesting telegram login code");
-        telegram.request_login_code_state().await?;
+        self.telegram
+            .as_mut()
+            .expect("telegram availability checked")
+            .request_login_code_state()
+            .await?;
         self.state.clear_login_notice();
         self.refresh_telegram_state().await
     }
 
     async fn submit_login_input(&mut self) -> Result<()> {
-        let Some(telegram) = self.telegram.as_mut() else {
-            self.state.set_login_notice("telegram client is unavailable");
+        if !self.ensure_telegram_login_available("telegram client is unavailable") {
             return Ok(());
-        };
+        }
 
         let input = self.state.login_input.trim().to_owned();
         if input.is_empty() {
@@ -270,16 +224,44 @@ impl App {
             return Ok(());
         }
 
+        let login_phase = self.state.login_phase;
         let result = match self.state.login_input_mode {
             Some(LoginInputMode::Phone) => {
-                telegram.set_phone_number(input)?;
-                telegram.request_login_code_state().await
+                self.telegram
+                    .as_mut()
+                    .expect("telegram availability checked")
+                    .set_phone_number(input)?;
+                self.telegram
+                    .as_mut()
+                    .expect("telegram availability checked")
+                    .request_login_code_state()
+                    .await
             }
-            Some(LoginInputMode::Code) => telegram.submit_login_code_state(&input).await,
-            Some(LoginInputMode::Password) => telegram.submit_password_state(&input).await,
-            None => match self.state.login_phase {
-                Some(LoginPhase::CodeRequested) => telegram.submit_login_code_state(&input).await,
-                Some(LoginPhase::PasswordRequired) => telegram.submit_password_state(&input).await,
+            Some(LoginInputMode::Code) => self
+                .telegram
+                .as_mut()
+                .expect("telegram availability checked")
+                .submit_login_code_state(&input)
+                .await,
+            Some(LoginInputMode::Password) => self
+                .telegram
+                .as_mut()
+                .expect("telegram availability checked")
+                .submit_password_state(&input)
+                .await,
+            None => match login_phase {
+                Some(LoginPhase::CodeRequested) => self
+                    .telegram
+                    .as_mut()
+                    .expect("telegram availability checked")
+                    .submit_login_code_state(&input)
+                    .await,
+                Some(LoginPhase::PasswordRequired) => self
+                    .telegram
+                    .as_mut()
+                    .expect("telegram availability checked")
+                    .submit_password_state(&input)
+                    .await,
                 _ => {
                     self.state.set_login_notice("nothing to submit in current login phase");
                     return Ok(());
@@ -302,13 +284,16 @@ impl App {
     }
 
     async fn logout_telegram(&mut self) -> Result<()> {
-        let Some(telegram) = self.telegram.as_mut() else {
-            self.state.set_login_notice("telegram client is unavailable");
+        if !self.ensure_telegram_login_available("telegram client is unavailable") {
             return Ok(());
-        };
+        }
 
         info!("clearing telegram session");
-        telegram.clear_session_and_reconnect().await?;
+        self.telegram
+            .as_mut()
+            .expect("telegram availability checked")
+            .clear_session_and_reconnect()
+            .await?;
         self.state.clear_login_input();
         self.state.set_login_notice("telegram session cleared");
         self.in_flight_threads.clear();
@@ -339,12 +324,12 @@ impl App {
             if self.state.apply_cached_forum_threads() {
                 self.pending_forum_threads_fetch = None;
                 return;
-            }
+        }
 
-            self.state.set_forum_threads_loading();
-            self.pending_forum_threads_fetch = Some(PendingForumThreadsFetch {
-                root_chat_id,
-                requested_at: Instant::now() + Duration::from_millis(150),
+        self.state.set_forum_threads_loading();
+        self.pending_forum_threads_fetch = Some(PendingForumThreadsFetch {
+            root_chat_id,
+                requested_at: Instant::now() + PREVIEW_FETCH_DEBOUNCE,
             });
             self.pending_thread_fetch = None;
             self.state.source.messages.clear();
@@ -365,10 +350,7 @@ impl App {
             self.state.set_thread_loading();
         }
 
-        self.pending_thread_fetch = Some(PendingThreadFetch {
-            chat_id,
-            requested_at: Instant::now() + Duration::from_millis(150),
-        });
+        self.schedule_thread_fetch(chat_id, PREVIEW_FETCH_DEBOUNCE);
     }
 
     fn maybe_start_pending_forum_threads_fetch(&mut self) {
@@ -398,7 +380,9 @@ impl App {
         info!(chat_id = %root_chat_id.as_str(), "starting forum thread list fetch");
 
         tokio::spawn(async move {
-            let result = fetch_client.list_forum_topics(&root_chat_id, 500).await;
+            let result = fetch_client
+                .list_forum_topics(&root_chat_id, TELEGRAM_FETCH_FORUM_TOPIC_LIMIT)
+                .await;
             let _ = tx.send(ForumThreadsFetchResult { root_chat_id, result });
         });
     }
@@ -430,7 +414,9 @@ impl App {
         info!(chat_id = %chat_id.as_str(), "starting thread fetch");
 
         tokio::spawn(async move {
-            let result = fetch_client.fetch_messages(&chat_id, 50).await;
+            let result = fetch_client
+                .fetch_messages(&chat_id, TELEGRAM_FETCH_MESSAGE_LIMIT)
+                .await;
             let _ = tx.send(ThreadFetchResult { chat_id, result });
         });
     }
@@ -440,7 +426,7 @@ impl App {
             return;
         }
 
-        self.next_background_sync_at = Instant::now() + Duration::from_secs(20);
+        self.next_background_sync_at = Instant::now() + BACKGROUND_SYNC_INTERVAL;
 
         let Some(telegram) = self.telegram.as_ref() else {
             return;
@@ -456,17 +442,14 @@ impl App {
             self.in_flight_dialogs_sync = true;
             info!("starting background dialogs sync");
             tokio::spawn(async move {
-                let result = fetch_client.list_chats(500).await;
+                let result = fetch_client.list_chats(TELEGRAM_FETCH_DIALOG_LIMIT).await;
                 let _ = tx.send(DialogsSyncResult { result });
             });
         }
 
         if let Some(chat_id) = self.state.preview_chat_id() {
             if !self.in_flight_threads.contains(&chat_id) {
-                self.pending_thread_fetch = Some(PendingThreadFetch {
-                    chat_id,
-                    requested_at: Instant::now(),
-                });
+                self.schedule_thread_fetch(chat_id, std::time::Duration::ZERO);
             }
         }
     }
@@ -582,11 +565,11 @@ impl App {
     }
 
     fn send_composer_text(&mut self) -> Result<()> {
-        let Some(telegram) = self.telegram.as_ref() else {
-            self.state.set_composer_notice("telegram client is unavailable");
+        let Some(fetch_client) = self.telegram_fetch_client_or_composer_notice(
+            "telegram client is unavailable",
+        ) else {
             return Ok(());
         };
-        let fetch_client = telegram.fetch_client();
 
         let Some(chat_id) = self.state.active_chat_id() else {
             self.state.set_composer_notice("no chat selected");
@@ -633,86 +616,11 @@ impl App {
 
     fn schedule_force_thread_refresh(&mut self, chat_id: ChatId) {
         self.state.set_thread_loading();
-        self.pending_thread_fetch = Some(PendingThreadFetch {
-            chat_id,
-            requested_at: Instant::now(),
-        });
-    }
-
-    fn handle_messenger_up(&mut self) -> Result<()> {
-        if self.state.messenger_focus == MessengerFocus::Right {
-            self.state.scroll_thread_up(3);
-        } else {
-            if self.state.is_inside_group_threads() {
-                self.state.select_previous_thread_chat();
-            } else {
-                self.state.select_previous_root_chat();
-            }
-            self.schedule_preview_fetch();
-            self.sync_draft_for_active_chat()?;
-        }
-        Ok(())
-    }
-
-    fn handle_messenger_down(&mut self) -> Result<()> {
-        if self.state.messenger_focus == MessengerFocus::Right {
-            self.state.scroll_thread_down(3);
-        } else {
-            if self.state.is_inside_group_threads() {
-                self.state.select_next_thread_chat();
-            } else {
-                self.state.select_next_root_chat();
-            }
-            self.schedule_preview_fetch();
-            self.sync_draft_for_active_chat()?;
-        }
-        Ok(())
-    }
-
-    fn handle_messenger_right(&mut self) -> Result<()> {
-        if self.state.is_inside_group_threads() {
-            if self.state.can_focus_right_pane() {
-                self.state.focus_right_pane();
-                if let Some(chat_id) = self.state.active_chat_id() {
-                    self.in_flight_threads.remove(&chat_id);
-                    self.schedule_force_thread_refresh(chat_id);
-                }
-            }
-            self.sync_draft_for_active_chat()?;
-            return Ok(());
-        }
-
-        if self.state.selected_root_has_threads() {
-            self.state.enter_selected_root();
-            self.schedule_preview_fetch();
-        } else if self.state.can_focus_right_pane() {
-            self.state.focus_right_pane();
-            if let Some(chat_id) = self.state.active_chat_id() {
-                self.in_flight_threads.remove(&chat_id);
-                self.schedule_force_thread_refresh(chat_id);
-            }
-        }
-        self.sync_draft_for_active_chat()?;
-        Ok(())
-    }
-
-    fn handle_messenger_left(&mut self) -> Result<()> {
-        if self.state.messenger_focus == MessengerFocus::Right {
-            self.state.focus_left_pane();
-            self.sync_draft_for_active_chat()?;
-            return Ok(());
-        }
-
-        if self.state.is_inside_group_threads() {
-            self.state.leave_group_threads();
-            self.schedule_preview_fetch();
-        }
-        self.sync_draft_for_active_chat()?;
-        Ok(())
+        self.schedule_thread_fetch(chat_id, std::time::Duration::ZERO);
     }
 
     fn load_thread_from_db(&mut self, chat_id: &ChatId) -> bool {
-        match self.cache.load_messages(chat_id, 200) {
+        match self.cache.load_messages(chat_id, DATABASE_THREAD_LOAD_LIMIT) {
             Ok(messages) if !messages.is_empty() => {
                 self.state.cache_thread(chat_id.clone(), messages);
                 true
@@ -763,34 +671,31 @@ impl App {
             self.next_optimistic_message_id
         ))
     }
-}
 
-struct PendingThreadFetch {
-    chat_id: ChatId,
-    requested_at: Instant,
-}
+    fn ensure_telegram_login_available(&mut self, notice: &str) -> bool {
+        if self.telegram.is_none() {
+            self.state.set_login_notice(notice);
+            return false;
+        }
+        true
+    }
 
-struct PendingForumThreadsFetch {
-    root_chat_id: ChatId,
-    requested_at: Instant,
-}
+    fn telegram_fetch_client_or_composer_notice(
+        &mut self,
+        notice: &str,
+    ) -> Option<pandere_plugin_telegram::TelegramFetchClient> {
+        let Some(telegram) = self.telegram.as_ref() else {
+            self.state.set_composer_notice(notice);
+            return None;
+        };
+        Some(telegram.fetch_client())
+    }
 
-struct ThreadFetchResult {
-    chat_id: ChatId,
-    result: Result<Vec<pandere_core::Message>>,
-}
+    fn schedule_thread_fetch(&mut self, chat_id: ChatId, delay: std::time::Duration) {
+        self.pending_thread_fetch = Some(PendingThreadFetch {
+            chat_id,
+            requested_at: Instant::now() + delay,
+        });
+    }
 
-struct ForumThreadsFetchResult {
-    root_chat_id: ChatId,
-    result: Result<Vec<pandere_core::ChatSummary>>,
-}
-
-struct DialogsSyncResult {
-    result: Result<Vec<ChatSummary>>,
-}
-
-struct SendMessageResult {
-    chat_id: ChatId,
-    optimistic_message_id: MessageId,
-    result: Result<Message>,
 }

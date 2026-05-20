@@ -9,7 +9,11 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthChar;
 
-use crate::{app::Screen, logs::LogEntry};
+use crate::{
+    app::Screen,
+    constants::{APP_TITLE, COMPOSER_PLACEHOLDER, NO_CONVERSATION_SELECTED},
+    logs::LogEntry,
+};
 use crate::state::{AppState, ChatPreview, MessengerFocus, MessengerView, PluginCard};
 
 fn base_text_style() -> Style {
@@ -88,7 +92,7 @@ pub fn draw_app(frame: &mut Frame, state: &AppState, log_lines: &[LogEntry]) {
         ])
         .split(frame.area());
 
-    let title = Paragraph::new(Line::from("Pandere Host Bridge"))
+    let title = Paragraph::new(Line::from(APP_TITLE))
         .block(block_for_screen(screen, "App"))
         .style(emph_text_style());
     frame.render_widget(title, chunks[0]);
@@ -264,7 +268,7 @@ fn draw_messenger(
             let leaf_title = state
                 .selected_leaf_chat()
                 .map(|chat| chat.title.clone())
-                .unwrap_or_else(|| "No conversation selected".into());
+                .unwrap_or_else(|| NO_CONVERSATION_SELECTED.into());
             vec![
                 Line::from(leaf_title),
                 Line::from(String::new()),
@@ -315,7 +319,7 @@ fn draw_messenger(
         right_lines.push(Line::from(if state.composer_active {
             format!("Compose: {}", state.composer_input)
         } else {
-            "Compose: press c".to_owned()
+            COMPOSER_PLACEHOLDER.to_owned()
         }));
         if let Some(notice) = state.composer_notice.as_deref() {
             right_lines.push(Line::from(format!("Notice: {notice}")));

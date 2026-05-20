@@ -4,6 +4,8 @@ use anyhow::Result;
 use pandere_core::Service;
 use pandere_plugin_host::{PluginHost, RuntimeHost, component_engine, dummy_component_bytes};
 
+use crate::constants::{SLACK_PLUGIN_VERSION, TELEGRAM_PLUGIN_VERSION};
+
 #[derive(Debug, Clone)]
 pub struct PluginManifest {
     pub id: String,
@@ -70,7 +72,7 @@ fn load_dummy_telegram() -> LoadedMessenger {
     let manifest = PluginManifest {
         id: "telegram".into(),
         display_name: "Telegram".into(),
-        version: "0.1.0-spike".into(),
+        version: TELEGRAM_PLUGIN_VERSION.into(),
         service: Service::Telegram,
         component_path: None,
         enabled: true,
@@ -99,7 +101,7 @@ fn load_placeholder_slack() -> LoadedMessenger {
         manifest: PluginManifest {
             id: "slack".into(),
             display_name: "Slack".into(),
-            version: "0.1.0-plan".into(),
+            version: SLACK_PLUGIN_VERSION.into(),
             service: Service::Slack,
             component_path: None,
             enabled: false,
