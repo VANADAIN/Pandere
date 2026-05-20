@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Service {
     Telegram,
+    Slack,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

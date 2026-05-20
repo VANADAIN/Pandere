@@ -56,10 +56,14 @@ impl PluginRegistry {
     pub fn primary(&self) -> Option<&LoadedMessenger> {
         self.messengers.first()
     }
+
+    pub fn all(&self) -> &[LoadedMessenger] {
+        &self.messengers
+    }
 }
 
 pub fn bootstrap_dummy_registry() -> PluginRegistry {
-    PluginRegistry::new(vec![load_dummy_telegram()])
+    PluginRegistry::new(vec![load_dummy_telegram(), load_placeholder_slack()])
 }
 
 fn load_dummy_telegram() -> LoadedMessenger {
@@ -88,4 +92,18 @@ fn instantiate_dummy_component() -> Result<PluginLoadStatus> {
     let runtime = RuntimeHost::default();
     host.probe_component(&component, runtime)?;
     Ok(PluginLoadStatus::Loaded)
+}
+
+fn load_placeholder_slack() -> LoadedMessenger {
+    LoadedMessenger {
+        manifest: PluginManifest {
+            id: "slack".into(),
+            display_name: "Slack".into(),
+            version: "0.1.0-plan".into(),
+            service: Service::Slack,
+            component_path: None,
+            enabled: false,
+        },
+        status: PluginLoadStatus::Disabled,
+    }
 }

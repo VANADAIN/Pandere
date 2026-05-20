@@ -290,12 +290,14 @@ impl CacheStore {
 fn service_key(service: Service) -> &'static str {
     match service {
         Service::Telegram => "telegram",
+        Service::Slack => "slack",
     }
 }
 
 fn service_from_key(value: &str) -> rusqlite::Result<Service> {
     match value {
         "telegram" => Ok(Service::Telegram),
+        "slack" => Ok(Service::Slack),
         _ => Err(rusqlite::Error::FromSqlConversionFailure(
             0,
             rusqlite::types::Type::Text,

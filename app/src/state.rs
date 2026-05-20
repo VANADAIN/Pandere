@@ -185,25 +185,47 @@ impl AppState {
     }
 
     pub fn plugin_cards(&self) -> Vec<PluginCard> {
-        let loaded = self.registry.primary().cloned().unwrap_or_else(fallback_messenger);
-        let plugin_status_label = loaded.status_label();
-        let component_label = loaded
-            .manifest
-            .component_path
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "embedded dummy component".into());
+        if self.registry.all().is_empty() {
+            let loaded = fallback_messenger();
+            return vec![PluginCard {
+                display_name: loaded.manifest.display_name.clone(),
+                version: loaded.manifest.version.clone(),
+                service: loaded.manifest.service,
+                enabled: loaded.manifest.enabled,
+                auth_label: self.source.auth_status.label(),
+                sync_label: self.source.sync_status.label(),
+                plugin_status_label: loaded.status_label(),
+                component_label: "embedded dummy component".into(),
+            }];
+        }
 
-        vec![PluginCard {
-            display_name: loaded.manifest.display_name,
-            version: loaded.manifest.version,
-            service: loaded.manifest.service,
-            enabled: loaded.manifest.enabled,
-            auth_label: self.source.auth_status.label(),
-            sync_label: self.source.sync_status.label(),
-            plugin_status_label,
-            component_label,
-        }]
+        self.registry
+            .all()
+            .iter()
+            .map(|loaded| PluginCard {
+                display_name: loaded.manifest.display_name.clone(),
+                version: loaded.manifest.version.clone(),
+                service: loaded.manifest.service,
+                enabled: loaded.manifest.enabled,
+                auth_label: if loaded.manifest.service == self.source.service {
+                    self.source.auth_status.label()
+                } else {
+                    "not connected".into()
+                },
+                sync_label: if loaded.manifest.service == self.source.service {
+                    self.source.sync_status.label()
+                } else {
+                    "idle".into()
+                },
+                plugin_status_label: loaded.status_label(),
+                component_label: loaded
+                    .manifest
+                    .component_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "embedded dummy component".into()),
+            })
+            .collect()
     }
 
     pub fn chat_previews(&self) -> Vec<ChatPreview> {

@@ -4,6 +4,7 @@ members = [
     "core",
     "plugin-api",
     "plugin-host",
+    "plugins/slack",
     "plugins/telegram",
 ]
 resolver = "3"
@@ -12,4 +13,3 @@ resolver = "3"
 edition = "2024"
 version = "0.1.0"
 license = "MIT"
-

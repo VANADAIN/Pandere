@@ -1804,6 +1804,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pandere-plugin-slack"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "pandere-core",
+]
+
+[[package]]
 name = "pandere-plugin-telegram"
 version = "0.1.0"
 dependencies = [
