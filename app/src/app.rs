@@ -6,10 +6,7 @@ use std::{
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode};
 use pandere_core::{ChatId, ChatSummary, Message, MessageDeliveryState, MessageId, Service};
-use pandere_plugin_telegram::{
-    AuthStatus as TelegramAuthStatus, LoginPhase, TelegramClient, TelegramConfig,
-    clear_session_file,
-};
+use pandere_plugin_telegram::{AuthStatus as TelegramAuthStatus, LoginPhase};
 use ratatui::{Frame, Terminal, prelude::CrosstermBackend};
 use tokio::sync::mpsc;
 use tracing::info;
@@ -20,6 +17,7 @@ use crate::{
     data_source::{AuthStatus, SyncStatus},
     fixtures::FixtureMessengerSource,
     logs::LogBuffer,
+    messenger_service::TelegramService,
     state::{AppState, LoginInputMode, MessengerFocus},
     ui,
 };
@@ -34,8 +32,7 @@ pub enum Screen {
 
 pub struct App {
     state: AppState,
-    telegram_config: Option<TelegramConfig>,
-    telegram: Option<TelegramClient>,
+    telegram: Option<TelegramService>,
     log_buffer: LogBuffer,
     cache: CacheStore,
     fetch_tx: mpsc::UnboundedSender<ThreadFetchResult>,
@@ -59,8 +56,7 @@ pub struct App {
 impl App {
     pub fn new(
         state: AppState,
-        telegram_config: Option<TelegramConfig>,
-        telegram: Option<TelegramClient>,
+        telegram: Option<TelegramService>,
         log_buffer: LogBuffer,
         cache: CacheStore,
     ) -> Self {
@@ -70,7 +66,6 @@ impl App {
         let (send_tx, send_rx) = mpsc::unbounded_channel();
         Self {
             state,
-            telegram_config,
             telegram,
             log_buffer,
             cache,
@@ -307,17 +302,13 @@ impl App {
     }
 
     async fn logout_telegram(&mut self) -> Result<()> {
-        let Some(config) = self.telegram_config.clone() else {
-            self.state.set_login_notice("telegram config is unavailable");
+        let Some(telegram) = self.telegram.as_mut() else {
+            self.state.set_login_notice("telegram client is unavailable");
             return Ok(());
         };
 
         info!("clearing telegram session");
-        self.telegram = None;
-        clear_session_file(&config.session_path)?;
-
-        let telegram = TelegramClient::connect(config).await?;
-        self.telegram = Some(telegram);
+        telegram.clear_session_and_reconnect().await?;
         self.state.clear_login_input();
         self.state.set_login_notice("telegram session cleared");
         self.in_flight_threads.clear();

@@ -3,6 +3,7 @@ mod cache;
 mod data_source;
 mod fixtures;
 mod logs;
+mod messenger_service;
 mod plugin;
 mod state;
 mod terminal;
@@ -10,7 +11,7 @@ mod ui;
 
 use anyhow::Result;
 use pandere_core::paths::pandere_paths;
-use pandere_plugin_telegram::{TelegramClient, TelegramConfig};
+use pandere_plugin_telegram::TelegramConfig;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, prelude::*};
 
@@ -19,6 +20,7 @@ use crate::{
     cache::CacheStore,
     fixtures::HostBackedFixtureSource,
     logs::{LogBuffer, LogBufferLayer},
+    messenger_service::TelegramService,
     plugin::bootstrap_dummy_registry,
     state::AppState,
     terminal::TerminalGuard,
@@ -55,7 +57,7 @@ async fn main() -> Result<()> {
             .expect("dummy registry should contain a messenger"),
     );
     let state = AppState::new(source, registry)?;
-    let mut app = App::new(state, telegram_config, telegram, log_buffer, cache);
+    let mut app = App::new(state, telegram, log_buffer, cache);
     app.initialize().await?;
     let mut terminal = TerminalGuard::setup()?;
     app.run(terminal.terminal()).await
@@ -71,10 +73,10 @@ fn maybe_load_telegram_config() -> Result<Option<TelegramConfig>> {
     }
 }
 
-async fn maybe_connect_telegram(config: Option<TelegramConfig>) -> Result<Option<TelegramClient>> {
+async fn maybe_connect_telegram(config: Option<TelegramConfig>) -> Result<Option<TelegramService>> {
     let Some(config) = config else {
         return Ok(None);
     };
 
-    Ok(Some(TelegramClient::connect(config).await?))
+    Ok(Some(TelegramService::connect(config).await?))
 }

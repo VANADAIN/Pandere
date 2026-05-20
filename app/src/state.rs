@@ -790,3 +790,103 @@ fn sort_messages(messages: &mut [Message]) {
         )
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use super::*;
+    use crate::{fixtures::FixtureMessengerSource, plugin::PluginRegistry};
+
+    fn test_state() -> AppState {
+        AppState::new(FixtureMessengerSource, PluginRegistry::new(vec![]))
+            .expect("state should initialize")
+    }
+
+    #[test]
+    fn merge_message_replaces_optimistic_message() {
+        let mut state = test_state();
+        let chat_id = state
+            .selected_root_chat_id
+            .clone()
+            .expect("fixture chat should exist");
+        let optimistic_id = MessageId::new("local:telegram:team:1");
+
+        let optimistic = Message {
+            id: optimistic_id.clone(),
+            chat_id: chat_id.clone(),
+            service: Service::Telegram,
+            author_name: "You".into(),
+            text: "draft".into(),
+            sent_at: SystemTime::now(),
+            is_outgoing: true,
+            delivery_state: MessageDeliveryState::Sending,
+        };
+        state.merge_message(&chat_id, optimistic, None);
+
+        let sent = Message {
+            id: MessageId::new("telegram:team:100"),
+            chat_id: chat_id.clone(),
+            service: Service::Telegram,
+            author_name: "You".into(),
+            text: "draft".into(),
+            sent_at: SystemTime::now() + Duration::from_secs(1),
+            is_outgoing: true,
+            delivery_state: MessageDeliveryState::Sent,
+        };
+        state.merge_message(&chat_id, sent.clone(), Some(&optimistic_id));
+
+        let messages = state
+            .thread_messages(&chat_id)
+            .expect("thread should exist after merge");
+        assert!(messages.iter().any(|message| message.id == sent.id));
+        assert!(!messages.iter().any(|message| message.id == optimistic_id));
+    }
+
+    #[test]
+    fn mark_message_delivery_updates_existing_message() {
+        let mut state = test_state();
+        let chat_id = state
+            .selected_root_chat_id
+            .clone()
+            .expect("fixture chat should exist");
+        let message_id = MessageId::new("local:telegram:team:2");
+        let message = Message {
+            id: message_id.clone(),
+            chat_id: chat_id.clone(),
+            service: Service::Telegram,
+            author_name: "You".into(),
+            text: "retry me".into(),
+            sent_at: SystemTime::now(),
+            is_outgoing: true,
+            delivery_state: MessageDeliveryState::Sending,
+        };
+        state.merge_message(&chat_id, message, None);
+
+        state.mark_message_delivery(&chat_id, &message_id, MessageDeliveryState::Failed);
+
+        let messages = state
+            .thread_messages(&chat_id)
+            .expect("thread should exist after merge");
+        let message = messages
+            .iter()
+            .find(|message| message.id == message_id)
+            .expect("message should remain in thread");
+        assert_eq!(message.delivery_state, MessageDeliveryState::Failed);
+    }
+
+    #[test]
+    fn set_chats_preserves_selection_when_chat_still_exists() {
+        let mut state = test_state();
+        let selected_chat_id = state
+            .selected_root_chat_id
+            .clone()
+            .expect("fixture chat should exist");
+
+        let mut chats = state.source.chats.clone();
+        chats.reverse();
+        state.set_chats(chats);
+
+        assert_eq!(state.selected_root_chat_id, Some(selected_chat_id));
+    }
+}

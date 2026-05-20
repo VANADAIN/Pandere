@@ -349,3 +349,105 @@ fn timestamp_to_system_time(timestamp: i64) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(timestamp as u64)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    fn temp_db_path(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| Duration::from_secs(0))
+            .as_nanos();
+        std::env::temp_dir().join(format!("pandere-{name}-{unique}.sqlite3"))
+    }
+
+    fn sample_chat() -> ChatSummary {
+        ChatSummary {
+            id: ChatId::new("telegram:1"),
+            service: Service::Telegram,
+            title: "Saved Messages".into(),
+            last_message_preview: Some("hello".into()),
+            unread_count: 1,
+            last_activity_at: Some(SystemTime::now()),
+            has_subchats: false,
+        }
+    }
+
+    fn sample_message(delivery_state: MessageDeliveryState) -> Message {
+        Message {
+            id: MessageId::new("telegram:1:100"),
+            chat_id: ChatId::new("telegram:1"),
+            service: Service::Telegram,
+            author_name: "You".into(),
+            text: "hello".into(),
+            sent_at: SystemTime::now(),
+            is_outgoing: true,
+            delivery_state,
+        }
+    }
+
+    #[test]
+    fn cache_round_trip_persists_chats_and_messages() {
+        let path = temp_db_path("round-trip");
+        let mut store = CacheStore::open(&path).expect("cache db should open");
+        let chat = sample_chat();
+        let message = sample_message(MessageDeliveryState::Sent);
+
+        store
+            .save_chats(Service::Telegram, std::slice::from_ref(&chat))
+            .expect("chats should persist");
+        store
+            .save_messages(&chat.id, std::slice::from_ref(&message))
+            .expect("messages should persist");
+
+        let chats = store.load_chats(Service::Telegram).expect("chats should load");
+        let messages = store.load_messages(&chat.id, 50).expect("messages should load");
+
+        assert_eq!(chats.len(), 1);
+        assert_eq!(chats[0].id.as_str(), chat.id.as_str());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id.as_str(), message.id.as_str());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cache_ignores_non_sent_messages() {
+        let path = temp_db_path("delivery-filter");
+        let mut store = CacheStore::open(&path).expect("cache db should open");
+        let chat = sample_chat();
+        let message = sample_message(MessageDeliveryState::Sending);
+
+        store
+            .save_messages(&chat.id, std::slice::from_ref(&message))
+            .expect("save should succeed");
+
+        let messages = store.load_messages(&chat.id, 50).expect("messages should load");
+        assert!(messages.is_empty());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cache_round_trip_persists_drafts() {
+        let path = temp_db_path("drafts");
+        let mut store = CacheStore::open(&path).expect("cache db should open");
+        let chat_id = ChatId::new("telegram:1");
+
+        store
+            .save_draft(&chat_id, "draft text")
+            .expect("draft should persist");
+        assert_eq!(
+            store.load_draft(&chat_id).expect("draft should load"),
+            Some("draft text".into())
+        );
+
+        store.clear_draft(&chat_id).expect("draft should clear");
+        assert_eq!(store.load_draft(&chat_id).expect("draft should load"), None);
+
+        let _ = std::fs::remove_file(path);
+    }
+}
