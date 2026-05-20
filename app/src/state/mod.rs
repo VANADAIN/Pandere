@@ -5,12 +5,12 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use pandere_core::{ChatId, ChatSummary, Message, Service};
-use pandere_plugin_telegram::{LoginPhase, LoginState};
 
 use crate::{
     app::Screen,
     constants::FALLBACK_COMPONENT_LABEL,
     data_source::{MessengerDataSource, MessengerSnapshot},
+    messenger_service::{LoginInputMode, LoginPhase, MessengerLoginState},
     plugin::{LoadedMessenger, PluginRegistry},
 };
 
@@ -33,13 +33,6 @@ pub struct ChatPreview {
     pub title: String,
     pub unread_count: u32,
     pub last_message_preview: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoginInputMode {
-    Phone,
-    Code,
-    Password,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,11 +76,12 @@ pub struct AppState {
     pub login_input_mode: Option<LoginInputMode>,
     pub login_input: String,
     pub login_notice: Option<String>,
-    pub login_phone_number: Option<String>,
-    pub login_session_path: Option<String>,
+    pub login_identifier_label: Option<String>,
+    pub login_identifier_value: Option<String>,
+    pub login_session_label: Option<String>,
     pub login_has_saved_session: bool,
     pub login_password_hint: Option<String>,
-    pub login_user_label: Option<String>,
+    pub login_account_label: Option<String>,
     pub forum_threads: HashMap<ChatId, Vec<ChatSummary>>,
     pub forum_threads_status: ThreadStatus,
     pub thread_cache: HashMap<ChatId, Vec<Message>>,
@@ -116,11 +110,12 @@ impl AppState {
             login_input_mode: None,
             login_input: String::new(),
             login_notice: None,
-            login_phone_number: None,
-            login_session_path: None,
+            login_identifier_label: None,
+            login_identifier_value: None,
+            login_session_label: None,
             login_has_saved_session: false,
             login_password_hint: None,
-            login_user_label: None,
+            login_account_label: None,
             forum_threads: HashMap::new(),
             forum_threads_status: ThreadStatus::Idle,
             thread_cache,
@@ -159,29 +154,25 @@ impl AppState {
     pub fn masked_login_input(&self) -> String {
         match self.login_input_mode {
             Some(LoginInputMode::Password) => "*".repeat(self.login_input.chars().count()),
-            Some(LoginInputMode::Phone) | Some(LoginInputMode::Code) | None => {
+            Some(LoginInputMode::Identifier) | Some(LoginInputMode::Code) | None => {
                 self.login_input.clone()
             }
         }
     }
 
-    pub fn apply_login_state(&mut self, state: LoginState) {
-        let phone_number = state.phone_number.clone();
+    pub fn apply_login_state(&mut self, state: MessengerLoginState) {
+        let identifier_value = state.identifier_value.clone().unwrap_or_default();
         self.login_phase = Some(state.phase);
-        self.login_phone_number = Some(phone_number.clone());
-        self.login_session_path = Some(state.session_path.display().to_string());
+        self.login_input_mode = state.input_mode;
+        self.login_identifier_label = state.identifier_label;
+        self.login_identifier_value = state.identifier_value;
+        self.login_session_label = state.session_label;
         self.login_has_saved_session = state.has_saved_session;
         self.login_password_hint = state.password_hint;
-        self.login_user_label = state.user_label;
-        self.login_input_mode = match state.phase {
-            LoginPhase::Connected => Some(LoginInputMode::Phone),
-            LoginPhase::CodeRequested => Some(LoginInputMode::Code),
-            LoginPhase::PasswordRequired => Some(LoginInputMode::Password),
-            LoginPhase::Disconnected | LoginPhase::Authorized => None,
-        };
+        self.login_account_label = state.account_label;
 
         match self.login_input_mode {
-            Some(LoginInputMode::Phone) => self.login_input = phone_number,
+            Some(LoginInputMode::Identifier) => self.login_input = identifier_value,
             Some(LoginInputMode::Code) | Some(LoginInputMode::Password) => {}
             None => self.clear_login_input(),
         }
@@ -315,17 +306,21 @@ impl AppState {
             .login_phase
             .map(|phase| format!("{phase:?}"))
             .unwrap_or_else(|| "Unavailable".into());
-        let phone_number = self
-            .login_phone_number
+        let identifier_label = self
+            .login_identifier_label
+            .as_deref()
+            .unwrap_or("Identifier");
+        let identifier_value = self
+            .login_identifier_value
             .as_deref()
             .unwrap_or("not configured");
-        let session_path = self
-            .login_session_path
+        let session_label = self
+            .login_session_label
             .as_deref()
             .unwrap_or("not configured");
-        let user_label = self.login_user_label.as_deref().unwrap_or("-");
+        let account_label = self.login_account_label.as_deref().unwrap_or("-");
         let input_label = match self.login_input_mode {
-            Some(LoginInputMode::Phone) => "Phone input",
+            Some(LoginInputMode::Identifier) => "Identifier input",
             Some(LoginInputMode::Code) => "Code input",
             Some(LoginInputMode::Password) => "Password input",
             None => "Input",
@@ -339,10 +334,10 @@ impl AppState {
             format!("Enabled: {}", plugin.manifest.enabled),
             format!("Component: {component_path}"),
             format!("Login phase: {phase_label}"),
-            format!("Phone: {phone_number}"),
-            format!("Session: {session_path}"),
+            format!("{identifier_label}: {identifier_value}"),
+            format!("Session: {session_label}"),
             format!("Saved session: {}", self.login_has_saved_session),
-            format!("Authorized user: {user_label}"),
+            format!("Authorized account: {account_label}"),
             format!("Auth: {}", self.source.auth_status.label()),
             format!("Sync: {}", self.source.sync_status.label()),
             format!("Plugin status: {}", plugin.status_label()),

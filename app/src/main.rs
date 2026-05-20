@@ -22,7 +22,7 @@ use crate::{
     constants::APP_TITLE,
     fixtures::HostBackedFixtureSource,
     logs::{LogBuffer, LogBufferLayer},
-    messenger_service::TelegramService,
+    messenger_service::{MessengerService, TelegramService},
     plugin::bootstrap_dummy_registry,
     state::AppState,
     terminal::TerminalGuard,
@@ -78,10 +78,12 @@ fn maybe_load_telegram_config() -> Result<Option<TelegramConfig>> {
     }
 }
 
-async fn maybe_connect_telegram(config: Option<TelegramConfig>) -> Result<Option<TelegramService>> {
+async fn maybe_connect_telegram(
+    config: Option<TelegramConfig>,
+) -> Result<Option<Box<dyn MessengerService>>> {
     let Some(config) = config else {
         return Ok(None);
     };
 
-    Ok(Some(TelegramService::connect(config).await?))
+    Ok(Some(Box::new(TelegramService::connect(config).await?)))
 }

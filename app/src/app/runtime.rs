@@ -76,7 +76,7 @@ impl App {
 
         match key.code {
             KeyCode::Char('r') => self.request_login_code().await?,
-            KeyCode::Char('x') => self.logout_telegram().await?,
+            KeyCode::Char('x') => self.logout_messenger().await?,
             KeyCode::Enter => self.submit_login_input().await?,
             KeyCode::Backspace => self.state.pop_login_input(),
             KeyCode::Esc => {

@@ -6,7 +6,6 @@ use std::{collections::HashSet, time::Instant};
 use anyhow::Result;
 use crossterm::event::{self, Event};
 use pandere_core::{ChatId, Message, MessageDeliveryState, MessageId, Service};
-use pandere_plugin_telegram::{AuthStatus as TelegramAuthStatus, LoginPhase};
 use ratatui::{Frame, Terminal, prelude::CrosstermBackend};
 use tokio::sync::mpsc;
 use tracing::info;
@@ -27,8 +26,8 @@ use crate::{
     data_source::{AuthStatus, SyncStatus},
     fixtures::FixtureMessengerSource,
     logs::LogBuffer,
-    messenger_service::TelegramService,
-    state::{AppState, LoginInputMode},
+    messenger_service::{LoginInputMode, LoginPhase, MessengerAuthStatus, MessengerService},
+    state::AppState,
     ui,
 };
 
@@ -42,7 +41,7 @@ pub enum Screen {
 
 pub struct App {
     state: AppState,
-    telegram: Option<TelegramService>,
+    messenger: Option<Box<dyn MessengerService>>,
     log_buffer: LogBuffer,
     cache: CacheStore,
     fetch_tx: mpsc::UnboundedSender<ThreadFetchResult>,
@@ -66,7 +65,7 @@ pub struct App {
 impl App {
     pub fn new(
         state: AppState,
-        telegram: Option<TelegramService>,
+        messenger: Option<Box<dyn MessengerService>>,
         log_buffer: LogBuffer,
         cache: CacheStore,
     ) -> Self {
@@ -76,7 +75,7 @@ impl App {
         let (send_tx, send_rx) = mpsc::unbounded_channel();
         Self {
             state,
-            telegram,
+            messenger,
             log_buffer,
             cache,
             fetch_tx,
@@ -100,8 +99,8 @@ impl App {
 
     pub async fn initialize(&mut self) -> Result<()> {
         self.load_cached_state()?;
-        if self.telegram.is_some() {
-            self.refresh_telegram_state().await?;
+        if self.messenger.is_some() {
+            self.refresh_messenger_state().await?;
         }
         self.sync_draft_for_active_chat()?;
 
@@ -154,23 +153,29 @@ impl App {
         );
     }
 
-    async fn refresh_telegram_state(&mut self) -> Result<()> {
-        if !self.ensure_telegram_login_available(TELEGRAM_ENV_NOTICE) {
+    async fn refresh_messenger_state(&mut self) -> Result<()> {
+        if !self.ensure_messenger_available(TELEGRAM_ENV_NOTICE) {
             return Ok(());
         }
 
+        let service = self
+            .messenger
+            .as_ref()
+            .expect("messenger availability checked")
+            .service();
+
         let (login_state, auth_status, chats) = {
-            let telegram = self
-                .telegram
+            let messenger = self
+                .messenger
                 .as_mut()
-                .expect("telegram availability checked");
-            let login_state = telegram.bootstrap_login().await?;
-            let auth_status = telegram.auth_status().await?;
+                .expect("messenger availability checked");
+            let login_state = messenger.bootstrap_login().await?;
+            let auth_status = messenger.auth_status().await?;
             let chats = match &auth_status {
-                TelegramAuthStatus::Authorized { .. } => {
-                    Some(telegram.list_chats(TELEGRAM_FETCH_DIALOG_LIMIT).await?)
+                MessengerAuthStatus::Authorized { .. } => {
+                    Some(messenger.list_chats(TELEGRAM_FETCH_DIALOG_LIMIT).await?)
                 }
-                TelegramAuthStatus::NeedsLogin | TelegramAuthStatus::Connected => None,
+                MessengerAuthStatus::NeedsLogin | MessengerAuthStatus::Connected => None,
             };
             (login_state, auth_status, chats)
         };
@@ -178,16 +183,18 @@ impl App {
         self.state.apply_login_state(login_state);
 
         match auth_status {
-            TelegramAuthStatus::Authorized { user_label } => {
-                self.state.source.auth_status = AuthStatus::Authenticated(user_label);
+            MessengerAuthStatus::Authorized { account_label } => {
+                self.state.source.service = service;
+                self.state.source.auth_status = AuthStatus::Authenticated(account_label);
                 self.state.source.sync_status = SyncStatus::Idle;
                 let chats = chats.expect("authorized telegram state should include chat list");
                 self.state.set_chats(chats.clone());
-                self.cache.save_chats(Service::Telegram, &chats)?;
+                self.cache.save_chats(service, &chats)?;
                 self.schedule_preview_fetch();
             }
-            TelegramAuthStatus::NeedsLogin | TelegramAuthStatus::Connected => {
+            MessengerAuthStatus::NeedsLogin | MessengerAuthStatus::Connected => {
                 let fixture = FixtureMessengerSource.snapshot()?;
+                self.state.source.service = service;
                 self.state.source.auth_status = AuthStatus::NeedsLogin;
                 self.state.source.sync_status = SyncStatus::Pending;
                 self.state.source.chats = fixture.chats;
@@ -203,22 +210,22 @@ impl App {
     }
 
     async fn request_login_code(&mut self) -> Result<()> {
-        if !self.ensure_telegram_login_available("telegram client is unavailable") {
+        if !self.ensure_messenger_available("messenger client is unavailable") {
             return Ok(());
         }
 
-        info!("requesting telegram login code");
-        self.telegram
+        info!("requesting messenger login code");
+        self.messenger
             .as_mut()
-            .expect("telegram availability checked")
-            .request_login_code_state()
+            .expect("messenger availability checked")
+            .request_login_code()
             .await?;
         self.state.clear_login_notice();
-        self.refresh_telegram_state().await
+        self.refresh_messenger_state().await
     }
 
     async fn submit_login_input(&mut self) -> Result<()> {
-        if !self.ensure_telegram_login_available("telegram client is unavailable") {
+        if !self.ensure_messenger_available("messenger client is unavailable") {
             return Ok(());
         }
 
@@ -230,44 +237,44 @@ impl App {
 
         let login_phase = self.state.login_phase;
         let result = match self.state.login_input_mode {
-            Some(LoginInputMode::Phone) => {
-                self.telegram
+            Some(LoginInputMode::Identifier) => {
+                self.messenger
                     .as_mut()
-                    .expect("telegram availability checked")
-                    .set_phone_number(input)?;
-                self.telegram
+                    .expect("messenger availability checked")
+                    .set_login_identifier(input.clone())?;
+                self.messenger
                     .as_mut()
-                    .expect("telegram availability checked")
-                    .request_login_code_state()
+                    .expect("messenger availability checked")
+                    .submit_login_input(LoginInputMode::Identifier, &input)
                     .await
             }
             Some(LoginInputMode::Code) => {
-                self.telegram
+                self.messenger
                     .as_mut()
-                    .expect("telegram availability checked")
-                    .submit_login_code_state(&input)
+                    .expect("messenger availability checked")
+                    .submit_login_input(LoginInputMode::Code, &input)
                     .await
             }
             Some(LoginInputMode::Password) => {
-                self.telegram
+                self.messenger
                     .as_mut()
-                    .expect("telegram availability checked")
-                    .submit_password_state(&input)
+                    .expect("messenger availability checked")
+                    .submit_login_input(LoginInputMode::Password, &input)
                     .await
             }
             None => match login_phase {
                 Some(LoginPhase::CodeRequested) => {
-                    self.telegram
+                    self.messenger
                         .as_mut()
-                        .expect("telegram availability checked")
-                        .submit_login_code_state(&input)
+                        .expect("messenger availability checked")
+                        .submit_login_input(LoginInputMode::Code, &input)
                         .await
                 }
                 Some(LoginPhase::PasswordRequired) => {
-                    self.telegram
+                    self.messenger
                         .as_mut()
-                        .expect("telegram availability checked")
-                        .submit_password_state(&input)
+                        .expect("messenger availability checked")
+                        .submit_login_input(LoginInputMode::Password, &input)
                         .await
                 }
                 _ => {
@@ -280,10 +287,10 @@ impl App {
 
         match result {
             Ok(_) => {
-                info!("telegram login step completed");
+                info!("messenger login step completed");
                 self.state.clear_login_input();
                 self.state.clear_login_notice();
-                self.refresh_telegram_state().await
+                self.refresh_messenger_state().await
             }
             Err(error) => {
                 self.state.set_login_notice(error.to_string());
@@ -292,28 +299,29 @@ impl App {
         }
     }
 
-    async fn logout_telegram(&mut self) -> Result<()> {
-        if !self.ensure_telegram_login_available("telegram client is unavailable") {
+    async fn logout_messenger(&mut self) -> Result<()> {
+        if !self.ensure_messenger_available("messenger client is unavailable") {
             return Ok(());
         }
 
-        info!("clearing telegram session");
-        self.telegram
+        info!("clearing messenger session");
+        self.messenger
             .as_mut()
-            .expect("telegram availability checked")
+            .expect("messenger availability checked")
             .clear_session_and_reconnect()
             .await?;
         self.state.clear_login_input();
-        self.state.set_login_notice("telegram session cleared");
+        self.state.set_login_notice("session cleared");
         self.in_flight_threads.clear();
         self.in_flight_forum_threads.clear();
         self.pending_thread_fetch = None;
         self.pending_forum_threads_fetch = None;
-        self.refresh_telegram_state().await
+        self.refresh_messenger_state().await
     }
 
     fn load_cached_state(&mut self) -> Result<()> {
-        let Some(snapshot) = self.cache.load_snapshot(Service::Telegram)? else {
+        let service = self.primary_service();
+        let Some(snapshot) = self.cache.load_snapshot(service)? else {
             return Ok(());
         };
 
@@ -372,7 +380,7 @@ impl App {
             return;
         }
 
-        let Some(telegram) = self.telegram.as_ref() else {
+        let Some(fetch_handle) = self.messenger_fetch_handle() else {
             self.pending_forum_threads_fetch = None;
             return;
         };
@@ -384,14 +392,13 @@ impl App {
         }
 
         let tx = self.forum_threads_tx.clone();
-        let fetch_client = telegram.fetch_client();
         self.in_flight_forum_threads.insert(root_chat_id.clone());
         self.pending_forum_threads_fetch = None;
         info!(chat_id = %root_chat_id.as_str(), "starting forum thread list fetch");
 
         tokio::spawn(async move {
-            let result = fetch_client
-                .list_forum_topics(&root_chat_id, TELEGRAM_FETCH_FORUM_TOPIC_LIMIT)
+            let result = fetch_handle
+                .list_subchats(&root_chat_id, TELEGRAM_FETCH_FORUM_TOPIC_LIMIT)
                 .await;
             let _ = tx.send(ForumThreadsFetchResult {
                 root_chat_id,
@@ -409,7 +416,7 @@ impl App {
             return;
         }
 
-        let Some(telegram) = self.telegram.as_ref() else {
+        let Some(fetch_handle) = self.messenger_fetch_handle() else {
             self.pending_thread_fetch = None;
             return;
         };
@@ -420,14 +427,13 @@ impl App {
             return;
         }
 
-        let fetch_client = telegram.fetch_client();
         let tx = self.fetch_tx.clone();
         self.in_flight_threads.insert(chat_id.clone());
         self.pending_thread_fetch = None;
         info!(chat_id = %chat_id.as_str(), "starting thread fetch");
 
         tokio::spawn(async move {
-            let result = fetch_client
+            let result = fetch_handle
                 .fetch_messages(&chat_id, TELEGRAM_FETCH_MESSAGE_LIMIT)
                 .await;
             let _ = tx.send(ThreadFetchResult { chat_id, result });
@@ -441,7 +447,7 @@ impl App {
 
         self.next_background_sync_at = Instant::now() + BACKGROUND_SYNC_INTERVAL;
 
-        let Some(telegram) = self.telegram.as_ref() else {
+        let Some(fetch_handle) = self.messenger_fetch_handle() else {
             return;
         };
 
@@ -451,11 +457,10 @@ impl App {
 
         if !self.in_flight_dialogs_sync {
             let tx = self.dialogs_sync_tx.clone();
-            let fetch_client = telegram.fetch_client();
             self.in_flight_dialogs_sync = true;
             info!("starting background dialogs sync");
             tokio::spawn(async move {
-                let result = fetch_client.list_chats(TELEGRAM_FETCH_DIALOG_LIMIT).await;
+                let result = fetch_handle.sync_tick(TELEGRAM_FETCH_DIALOG_LIMIT).await;
                 let _ = tx.send(DialogsSyncResult { result });
             });
         }
@@ -509,7 +514,7 @@ impl App {
                     );
                     self.state.source.sync_status = SyncStatus::Idle;
                     self.state.set_chats(chats.clone());
-                    if let Err(error) = self.cache.save_chats(Service::Telegram, &chats) {
+                    if let Err(error) = self.cache.save_chats(self.primary_service(), &chats) {
                         info!(error = %error, "failed to persist dialog cache");
                     }
                 }
@@ -555,7 +560,7 @@ impl App {
         while let Ok(result) = self.send_rx.try_recv() {
             match result.result {
                 Ok(mut message) => {
-                    info!(chat_id = %result.chat_id.as_str(), "sent telegram text message");
+                    info!(chat_id = %result.chat_id.as_str(), "sent text message");
                     message.delivery_state = MessageDeliveryState::Sent;
                     self.state.merge_message(
                         &result.chat_id,
@@ -569,7 +574,7 @@ impl App {
                     self.schedule_force_thread_refresh(result.chat_id);
                 }
                 Err(error) => {
-                    info!(chat_id = %result.chat_id.as_str(), error = %error, "failed to send telegram text message");
+                    info!(chat_id = %result.chat_id.as_str(), error = %error, "failed to send text message");
                     self.state.mark_message_delivery(
                         &result.chat_id,
                         &result.optimistic_message_id,
@@ -582,8 +587,8 @@ impl App {
     }
 
     fn send_composer_text(&mut self) -> Result<()> {
-        let Some(fetch_client) =
-            self.telegram_fetch_client_or_composer_notice("telegram client is unavailable")
+        let Some(fetch_handle) =
+            self.messenger_fetch_handle_or_composer_notice("messenger client is unavailable")
         else {
             return Ok(());
         };
@@ -603,7 +608,7 @@ impl App {
         let optimistic_message = Message {
             id: optimistic_message_id.clone(),
             chat_id: chat_id.clone(),
-            service: Service::Telegram,
+            service: self.primary_service(),
             author_name: "You".into(),
             text: text.clone(),
             sent_at: std::time::SystemTime::now(),
@@ -619,7 +624,7 @@ impl App {
 
         let tx = self.send_tx.clone();
         tokio::spawn(async move {
-            let result = fetch_client.send_text(&chat_id, &text).await;
+            let result = fetch_handle.send_text(&chat_id, &text).await;
             let _ = tx.send(SendMessageResult {
                 chat_id,
                 optimistic_message_id,
@@ -692,23 +697,36 @@ impl App {
         ))
     }
 
-    fn ensure_telegram_login_available(&mut self, notice: &str) -> bool {
-        if self.telegram.is_none() {
+    fn ensure_messenger_available(&mut self, notice: &str) -> bool {
+        if self.messenger.is_none() {
             self.state.set_login_notice(notice);
             return false;
         }
         true
     }
 
-    fn telegram_fetch_client_or_composer_notice(
+    fn messenger_fetch_handle_or_composer_notice(
         &mut self,
         notice: &str,
-    ) -> Option<pandere_plugin_telegram::TelegramFetchClient> {
-        let Some(telegram) = self.telegram.as_ref() else {
+    ) -> Option<std::sync::Arc<dyn crate::messenger_service::MessengerFetchHandle>> {
+        let Some(messenger) = self.messenger.as_ref() else {
             self.state.set_composer_notice(notice);
             return None;
         };
-        Some(telegram.fetch_client())
+        Some(messenger.fetch_handle())
+    }
+
+    fn messenger_fetch_handle(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::messenger_service::MessengerFetchHandle>> {
+        self.messenger.as_ref().map(|messenger| messenger.fetch_handle())
+    }
+
+    fn primary_service(&self) -> Service {
+        self.messenger
+            .as_ref()
+            .map(|messenger| messenger.service())
+            .unwrap_or(self.state.source.service)
     }
 
     fn schedule_thread_fetch(&mut self, chat_id: ChatId, delay: std::time::Duration) {

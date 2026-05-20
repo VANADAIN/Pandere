@@ -61,15 +61,7 @@ impl CacheStore {
         )?;
 
         let rows = statement.query_map(params![service_key(service)], |row| {
-            Ok(ChatSummary {
-                id: ChatId::new(row.get::<_, String>(0)?),
-                service,
-                title: row.get(1)?,
-                last_message_preview: row.get(2)?,
-                unread_count: row.get::<_, i64>(3)? as u32,
-                last_activity_at: row.get::<_, Option<i64>>(4)?.map(timestamp_to_system_time),
-                has_subchats: row.get::<_, i64>(5)? != 0,
-            })
+            map_chat_summary_row(row, service)
         })?;
 
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -80,29 +72,7 @@ impl CacheStore {
         let transaction = self.connection.transaction()?;
         let now = now_timestamp();
         for chat in chats {
-            transaction.execute(
-                "INSERT INTO chat_cache (
-                    service, chat_id, title, last_message_preview, unread_count, last_activity_at, has_subchats, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(chat_id) DO UPDATE SET
-                    service = excluded.service,
-                    title = excluded.title,
-                    last_message_preview = excluded.last_message_preview,
-                    unread_count = excluded.unread_count,
-                    last_activity_at = excluded.last_activity_at,
-                    has_subchats = excluded.has_subchats,
-                    updated_at = excluded.updated_at",
-                params![
-                    service_key(service),
-                    chat.id.as_str(),
-                    chat.title,
-                    chat.last_message_preview,
-                    i64::from(chat.unread_count),
-                    chat.last_activity_at.map(system_time_to_timestamp),
-                    if chat.has_subchats { 1 } else { 0 },
-                    now,
-                ],
-            )?;
+            upsert_chat_summary(&transaction, service, chat, now)?;
         }
         transaction.commit()?;
         self.store_sync_marker("dialogs:last_sync_at", now.to_string())?;
@@ -120,16 +90,7 @@ impl CacheStore {
 
         let mut messages = statement
             .query_map(params![chat_id.as_str(), limit as i64], |row| {
-                Ok(Message {
-                    id: MessageId::new(row.get::<_, String>(0)?),
-                    chat_id: chat_id.clone(),
-                    service: service_from_key(&row.get::<_, String>(1)?)?,
-                    author_name: row.get(2)?,
-                    text: row.get(3)?,
-                    sent_at: timestamp_to_system_time(row.get(4)?),
-                    is_outgoing: row.get::<_, i64>(5)? != 0,
-                    delivery_state: delivery_state_from_key(&row.get::<_, String>(6)?)?,
-                })
+                map_message_row(row, chat_id)
             })?
             .collect::<std::result::Result<Vec<_>, _>>()
             .context("failed to load cached messages")?;
@@ -147,43 +108,10 @@ impl CacheStore {
                 continue;
             }
 
-            transaction.execute(
-                "INSERT INTO message_cache (
-                    message_id, chat_id, service, author_name, body, sent_at, is_outgoing, delivery_state, cached_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT(message_id) DO UPDATE SET
-                    author_name = excluded.author_name,
-                    body = excluded.body,
-                    sent_at = excluded.sent_at,
-                    is_outgoing = excluded.is_outgoing,
-                    delivery_state = excluded.delivery_state,
-                    cached_at = excluded.cached_at",
-                params![
-                    message.id.as_str(),
-                    chat_id.as_str(),
-                    service_key(message.service),
-                    message.author_name,
-                    message.text,
-                    system_time_to_timestamp(message.sent_at),
-                    if message.is_outgoing { 1 } else { 0 },
-                    delivery_state_key(&message.delivery_state),
-                    now,
-                ],
-            )?;
+            upsert_message(&transaction, chat_id, message, now)?;
         }
 
-        transaction.execute(
-            "DELETE FROM message_cache
-             WHERE chat_id = ?1
-               AND message_id NOT IN (
-                    SELECT message_id
-                    FROM message_cache
-                    WHERE chat_id = ?1
-                    ORDER BY sent_at DESC, rowid DESC
-                    LIMIT ?2
-               )",
-            params![chat_id.as_str(), MESSAGE_CACHE_LIMIT_PER_CHAT],
-        )?;
+        prune_message_cache(&transaction, chat_id)?;
 
         transaction.commit()?;
         Ok(())
@@ -239,52 +167,162 @@ impl CacheStore {
     }
 
     fn initialize(&self) -> Result<()> {
-        self.connection.execute_batch(
-            "
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
-            CREATE TABLE IF NOT EXISTS chat_cache (
-                service TEXT NOT NULL,
-                chat_id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                last_message_preview TEXT,
-                unread_count INTEGER NOT NULL,
-                last_activity_at INTEGER,
-                has_subchats INTEGER NOT NULL DEFAULT 0,
-                updated_at INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_chat_cache_service_activity
-                ON chat_cache(service, last_activity_at DESC);
-
-            CREATE TABLE IF NOT EXISTS message_cache (
-                message_id TEXT PRIMARY KEY,
-                chat_id TEXT NOT NULL,
-                service TEXT NOT NULL,
-                author_name TEXT NOT NULL,
-                body TEXT NOT NULL,
-                sent_at INTEGER NOT NULL,
-                is_outgoing INTEGER NOT NULL,
-                delivery_state TEXT NOT NULL,
-                cached_at INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_message_cache_chat_sent
-                ON message_cache(chat_id, sent_at DESC);
-
-            CREATE TABLE IF NOT EXISTS draft_cache (
-                chat_id TEXT PRIMARY KEY,
-                body TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS sync_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            ",
-        )?;
+        self.connection.execute_batch(cache_schema())?;
         Ok(())
     }
+}
+
+fn map_chat_summary_row(row: &rusqlite::Row<'_>, service: Service) -> rusqlite::Result<ChatSummary> {
+    Ok(ChatSummary {
+        id: ChatId::new(row.get::<_, String>(0)?),
+        service,
+        title: row.get(1)?,
+        last_message_preview: row.get(2)?,
+        unread_count: row.get::<_, i64>(3)? as u32,
+        last_activity_at: row.get::<_, Option<i64>>(4)?.map(timestamp_to_system_time),
+        has_subchats: row.get::<_, i64>(5)? != 0,
+    })
+}
+
+fn map_message_row(row: &rusqlite::Row<'_>, chat_id: &ChatId) -> rusqlite::Result<Message> {
+    Ok(Message {
+        id: MessageId::new(row.get::<_, String>(0)?),
+        chat_id: chat_id.clone(),
+        service: service_from_key(&row.get::<_, String>(1)?)?,
+        author_name: row.get(2)?,
+        text: row.get(3)?,
+        sent_at: timestamp_to_system_time(row.get(4)?),
+        is_outgoing: row.get::<_, i64>(5)? != 0,
+        delivery_state: delivery_state_from_key(&row.get::<_, String>(6)?)?,
+    })
+}
+
+fn upsert_chat_summary(
+    transaction: &rusqlite::Transaction<'_>,
+    service: Service,
+    chat: &ChatSummary,
+    now: i64,
+) -> rusqlite::Result<()> {
+    transaction.execute(
+        "INSERT INTO chat_cache (
+            service, chat_id, title, last_message_preview, unread_count, last_activity_at, has_subchats, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(chat_id) DO UPDATE SET
+            service = excluded.service,
+            title = excluded.title,
+            last_message_preview = excluded.last_message_preview,
+            unread_count = excluded.unread_count,
+            last_activity_at = excluded.last_activity_at,
+            has_subchats = excluded.has_subchats,
+            updated_at = excluded.updated_at",
+        params![
+            service_key(service),
+            chat.id.as_str(),
+            chat.title,
+            chat.last_message_preview,
+            i64::from(chat.unread_count),
+            chat.last_activity_at.map(system_time_to_timestamp),
+            if chat.has_subchats { 1 } else { 0 },
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+fn upsert_message(
+    transaction: &rusqlite::Transaction<'_>,
+    chat_id: &ChatId,
+    message: &Message,
+    now: i64,
+) -> rusqlite::Result<()> {
+    transaction.execute(
+        "INSERT INTO message_cache (
+            message_id, chat_id, service, author_name, body, sent_at, is_outgoing, delivery_state, cached_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(message_id) DO UPDATE SET
+            author_name = excluded.author_name,
+            body = excluded.body,
+            sent_at = excluded.sent_at,
+            is_outgoing = excluded.is_outgoing,
+            delivery_state = excluded.delivery_state,
+            cached_at = excluded.cached_at",
+        params![
+            message.id.as_str(),
+            chat_id.as_str(),
+            service_key(message.service),
+            message.author_name,
+            message.text,
+            system_time_to_timestamp(message.sent_at),
+            if message.is_outgoing { 1 } else { 0 },
+            delivery_state_key(&message.delivery_state),
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+fn prune_message_cache(
+    transaction: &rusqlite::Transaction<'_>,
+    chat_id: &ChatId,
+) -> rusqlite::Result<()> {
+    transaction.execute(
+        "DELETE FROM message_cache
+         WHERE chat_id = ?1
+           AND message_id NOT IN (
+                SELECT message_id
+                FROM message_cache
+                WHERE chat_id = ?1
+                ORDER BY sent_at DESC, rowid DESC
+                LIMIT ?2
+           )",
+        params![chat_id.as_str(), MESSAGE_CACHE_LIMIT_PER_CHAT],
+    )?;
+    Ok(())
+}
+
+fn cache_schema() -> &'static str {
+    "
+    PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
+    CREATE TABLE IF NOT EXISTS chat_cache (
+        service TEXT NOT NULL,
+        chat_id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        last_message_preview TEXT,
+        unread_count INTEGER NOT NULL,
+        last_activity_at INTEGER,
+        has_subchats INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_cache_service_activity
+        ON chat_cache(service, last_activity_at DESC);
+
+    CREATE TABLE IF NOT EXISTS message_cache (
+        message_id TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL,
+        service TEXT NOT NULL,
+        author_name TEXT NOT NULL,
+        body TEXT NOT NULL,
+        sent_at INTEGER NOT NULL,
+        is_outgoing INTEGER NOT NULL,
+        delivery_state TEXT NOT NULL,
+        cached_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_cache_chat_sent
+        ON message_cache(chat_id, sent_at DESC);
+
+    CREATE TABLE IF NOT EXISTS draft_cache (
+        chat_id TEXT PRIMARY KEY,
+        body TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS sync_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+    "
 }
 
 fn service_key(service: Service) -> &'static str {
